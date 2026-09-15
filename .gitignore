@@ -25,6 +25,9 @@ build/
 
 # Pretrained models / checkpoints
 #playground/Pretrained_models/
+playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
+playground/Pretrained_models/Qwen3-VL-4B-Instruct
+playground/Pretrained_models/Qwen3.5-4B
 *.pt
 *.pth
 *.ckpt
