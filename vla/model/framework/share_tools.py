@@ -258,43 +258,67 @@ def merge_framework_config(default_config_cls, cfg):
     return cfg
 
 
-def populate_layerwise_dit_cfg(cfg, *, dit_hidden_dim: int, num_dit_layers: int):
-    """
-    Populate ``framework.action_model.diffusion_model_cfg`` with the DiT shape
-    fields required by ``LayerwiseFlowmatchingActionHead``.
+# def populate_layerwise_dit_cfg(cfg, *, dit_hidden_dim: int, num_dit_layers: int):
+#     """
+#     Populate ``framework.action_model.diffusion_model_cfg`` with the DiT shape
+#     fields required by ``LayerwiseFlowmatchingActionHead``.
+#
+#     Why this helper exists:
+#         The action head is intentionally agnostic of the VLM backbone — it only
+#         consumes ``diffusion_model_cfg``.  Each framework (QwenPI, QwenPI_v3,
+#         ...) is responsible for deciding the DiT shape (depth + hidden) from
+#         whatever source it likes (LLM hidden, a compressed projector dim, ...)
+#         and writing it here BEFORE calling ``get_action_model``.
+#
+#     Fields written (override any stale YAML values):
+#         - num_layers           = num_dit_layers
+#         - input_embedding_dim  = dit_hidden_dim
+#         - cross_attention_dim  = dit_hidden_dim   (encoder is pre-projected)
+#         - num_attention_heads  = dit_hidden_dim // attention_head_dim
+#                                  (uses existing attention_head_dim if set, else 64)
+#
+#     Args:
+#         cfg: Full OmegaConf config.
+#         dit_hidden_dim: DiT internal hidden dim.
+#         num_dit_layers: Number of DiT cross-attention layers.
+#
+#     Returns:
+#         The (mutated) diffusion_model_cfg node.
+#     """
+#     dit_cfg = cfg.framework.action_model.diffusion_model_cfg
+#     head_dim = dit_cfg.get("attention_head_dim", None) or 64
+#     dit_cfg.attention_head_dim = head_dim
+#     dit_cfg.num_layers = int(num_dit_layers)
+#     dit_cfg.input_embedding_dim = int(dit_hidden_dim)
+#     dit_cfg.cross_attention_dim = int(dit_hidden_dim)
+#     dit_cfg.num_attention_heads = int(dit_hidden_dim) // int(head_dim)
+#     return dit_cfg
 
-    Why this helper exists:
-        The action head is intentionally agnostic of the VLM backbone — it only
-        consumes ``diffusion_model_cfg``.  Each framework (QwenPI, QwenPI_v3,
-        ...) is responsible for deciding the DiT shape (depth + hidden) from
-        whatever source it likes (LLM hidden, a compressed projector dim, ...)
-        and writing it here BEFORE calling ``get_action_model``.
-
-    Fields written (override any stale YAML values):
-        - num_layers           = num_dit_layers
-        - input_embedding_dim  = dit_hidden_dim
-        - cross_attention_dim  = dit_hidden_dim   (encoder is pre-projected)
-        - num_attention_heads  = dit_hidden_dim // attention_head_dim
-                                 (uses existing attention_head_dim if set, else 64)
-
-    Args:
-        cfg: Full OmegaConf config.
-        dit_hidden_dim: DiT internal hidden dim.
-        num_dit_layers: Number of DiT cross-attention layers.
-
-    Returns:
-        The (mutated) diffusion_model_cfg node.
-    """
+def populate_layerwise_dit_cfg(
+    cfg,
+    *,
+    dit_hidden_dim: int,
+    vl_hidden_dim: int,
+    num_dit_layers: int,
+):
     dit_cfg = cfg.framework.action_model.diffusion_model_cfg
+
     head_dim = dit_cfg.get("attention_head_dim", None) or 64
     dit_cfg.attention_head_dim = head_dim
-    dit_cfg.num_layers = int(num_dit_layers)
+
+    # DiT自己的宽度
     dit_cfg.input_embedding_dim = int(dit_hidden_dim)
-    dit_cfg.cross_attention_dim = int(dit_hidden_dim)
-    dit_cfg.num_attention_heads = int(dit_hidden_dim) // int(head_dim)
+
+    # Qwen输出的宽度
+    dit_cfg.cross_attention_dim = int(vl_hidden_dim)
+
+    dit_cfg.num_layers = int(num_dit_layers)
+
+    dit_cfg.num_attention_heads = (
+        int(dit_hidden_dim) // int(head_dim)
+    )
+
     return dit_cfg
-
-
 def read_model_config(pretrained_checkpoint):
     """
     Load global model configuration and dataset normalization statistics
