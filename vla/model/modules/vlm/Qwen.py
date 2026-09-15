@@ -51,7 +51,7 @@ class _QWen_VL_Interface(nn.Module):
             torch_dtype=torch.bfloat16,
             attn_implementation=attn_implementation,
             # device_map="auto",
-        ).to("cuda")
+        )
 
         # processer
         processor = AutoProcessor.from_pretrained(model_id)
