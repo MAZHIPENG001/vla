@@ -283,7 +283,7 @@ if __name__ == "__main__":
 
     batch = [sample, sample2]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    model = model.to(device,dtype=torch.bfloat16)
     forward_output = model(batch)
     action_loss = forward_output["action_loss"]
     print(f"Action Loss: {action_loss.item()}")
