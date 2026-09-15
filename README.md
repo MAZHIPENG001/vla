@@ -46,3 +46,8 @@ uv run vla/model/framework/VLM4A/QwenGR00T.py
 python vla/dataloader/lerobot_datasets.py \
   --config_yaml examples/LIBERO/train_files/starvla_cotrain_libero.yaml
 ```
+
+# huggingface 模型下载
+```bash
+huggingface-cli download Qwen/Qwen3-VL-4B-Instruct --local-dir playground/Pretrained_models/Qwen3-VL-4B-Instruct
+```
