@@ -139,7 +139,11 @@ class Qwen_PI(baseframework):
             vl_embs_list = list(qwenvl_outputs.hidden_states[-expected_layers:])
         return vl_embs_list, attention_mask
 
-    def forward(self, examples: List[dict] = None, **kwargs) -> dict:
+    def forward(
+            self,
+            examples: List[dict] = None,
+            **kwargs,
+    ) -> Tuple:
         """
         Args:
             examples: List[dict], each dict requires:
@@ -161,8 +165,7 @@ class Qwen_PI(baseframework):
         base_hidden = vl_embs_list[-1]
 
         # Step 4: Action Expert Forward and Loss
-        # with torch.autocast("cuda", dtype=torch.float32):
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast("cuda", dtype=torch.float32):
             # Label alignment: take the last chunk_len segment
             actions = torch.tensor(
                 np.array(actions), device=base_hidden.device, dtype=base_hidden.dtype
@@ -197,7 +200,12 @@ class Qwen_PI(baseframework):
 
         return {"action_loss": action_loss}
 
-    def predict_action(self, examples: List[dict] = None, **kwargs: str) -> np.ndarray:
+    @torch.inference_mode()
+    def predict_action(  # TODO align  predict_action with forward, make api more flexible
+            self,
+            examples: List[dict] = None,
+            **kwargs: str,
+    ) -> np.ndarray:
         """
         Inference: single forward pass to directly regress future actions (no diffusion sampling).
 
@@ -234,8 +242,7 @@ class Qwen_PI(baseframework):
             else None
         )
         # Step 4: Action Expert Forward and Loss
-        # with torch.autocast("cuda", dtype=torch.float32):
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast("cuda", dtype=torch.float32):
             pred_actions = self.action_model.predict_action(
                 vl_embs_list, state, encoder_attention_mask=backbone_attention_mask
             )  # (B, chunk_len, action_dim)
