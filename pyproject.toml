@@ -2,7 +2,26 @@
 name = "vla"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "accelerate==1.15.0",
+    "av==18.1.0",
+    "decord==0.6.0",
+    "diffusers==0.40.0",
+    "numpy==2.4.6",
+    "omegaconf==2.3.1",
+    "pillow==12.3.0",
+    "psutil==7.2.2",
+    "pyyaml==6.0.3",
+    "qwen-vl-utils==0.0.8",
+    "rich==15.0.0",
+    "safetensors==0.8.0",
+    "torch==2.11.0+cu128",
+    "torchaudio==2.11.0+cu128",
+    "torchvision==0.26.0+cu128",
+    "tqdm==4.70.1",
+    "transformers==5.17.0",
+    "typer==0.27.2",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -11,3 +30,13 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["vla*"]
 exclude = ["playground*"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
