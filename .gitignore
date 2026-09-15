@@ -24,7 +24,7 @@ build/
 *.key
 
 # Pretrained models / checkpoints
-playground/Pretrained_models/
+#playground/Pretrained_models/
 *.pt
 *.pth
 *.ckpt
