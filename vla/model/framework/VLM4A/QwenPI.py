@@ -105,6 +105,8 @@ class Qwen_PI(baseframework):
 
         llm_hidden_size = int(vlm_hf_cfg.hidden_size)
         num_vl_layers = int(text_cfg.num_hidden_layers)
+        print(f"\33[92mllm_hidden_size={llm_hidden_size}")
+        print(f"num_vl_layers={num_vl_layers}\33[0m")
         self.config.framework.qwenvl.vl_hidden_dim = llm_hidden_size
         self.config.framework.qwenvl.num_vl_layers = num_vl_layers
 
