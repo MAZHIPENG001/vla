@@ -319,10 +319,10 @@ if __name__ == "__main__":
     model = model.to(device)
     forward_output = model(batch)
     action_loss = forward_output["action_loss"]
-    print(f"Action Loss: {action_loss.item()}")
+    print(f"\33[93mAction Loss: {action_loss.item()}\33[0m")
 
     predict_output = model.predict_action(examples=[sample])
     normalized_actions = predict_output["normalized_actions"]
-    print(f"Unnormalized Action: {normalized_actions}")
+    print(f"\33[92mUnnormalized Action: {normalized_actions}\33[0m")
 
     print("Finished")

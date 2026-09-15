@@ -3,7 +3,7 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 uv sync
-
+uv pip install flash-attn --no-build-isolation
 uv pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 uv pip install qwen-vl-utils[decord]==0.0.8
 ```
@@ -29,4 +29,5 @@ readlink -f /root/vla/playground/Pretrained_models
 uv run vla/model/modules/vlm/Qwen.py
 
 uv run vla/model/framework/VLM4A/QwenPI.py
+uv run vla/model/framework/VLM4A/QwenGR00T.py
 ```
