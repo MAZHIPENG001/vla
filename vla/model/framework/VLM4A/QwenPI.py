@@ -110,16 +110,9 @@ class Qwen_PI(baseframework):
 
         # QwenPI: DiT runs at the LLM hidden size (no compression).  Tell the
         # action head exactly that — the head itself does not look at qwenvl.*.
-        # populate_layerwise_dit_cfg(
-        #     self.config,
-        #     dit_hidden_dim=llm_hidden_size,
-        #     num_dit_layers=num_vl_layers,
-        # )
-        dit_hidden_dim = 1024
         populate_layerwise_dit_cfg(
             self.config,
-            dit_hidden_dim=dit_hidden_dim,
-            vl_hidden_dim=llm_hidden_size,
+            dit_hidden_dim=llm_hidden_size,
             num_dit_layers=num_vl_layers,
         )
 
