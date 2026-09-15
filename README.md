@@ -9,9 +9,14 @@ uv pip install pandas
 uv pip install numpydantic
 uv pip install opencv-python
 uv pip install opencv-python-headless
+uv pip install albumentations
 uv pip install pydantic
 uv pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 uv pip install qwen-vl-utils[decord]==0.0.8
+uv pip install ninja fvcore iopath
+
+uv pip install --no-build-isolation \
+  "git+https://github.com/facebookresearch/pytorch3d.git"
 ```
 # 激活环境
 ```bash
