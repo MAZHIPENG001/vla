@@ -5,6 +5,11 @@ uv --version
 uv sync
 uv pip install ninja packaging
 uv pip install flash-attn --no-build-isolation
+uv pip install pandas
+uv pip install numpydantic
+uv pip install opencv-python
+uv pip install opencv-python-headless
+uv pip install pydantic
 uv pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 uv pip install qwen-vl-utils[decord]==0.0.8
 ```
@@ -23,10 +28,16 @@ ls -ld /root/vla/playground
 readlink -f /root/vla/playground
 ```
 
-# 验证
+# 模型验证
 ```bash
 uv run vla/model/modules/vlm/Qwen.py
 
 uv run vla/model/framework/VLM4A/QwenPI.py
 uv run vla/model/framework/VLM4A/QwenGR00T.py
+```
+
+# 数据集验证
+```bash
+python vla/dataloader/lerobot_datasets.py \
+  --config_yaml examples/LIBERO/train_files/starvla_cotrain_libero.yaml
 ```
