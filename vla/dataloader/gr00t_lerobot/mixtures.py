@@ -30,6 +30,9 @@ DATASET_NAMED_MIXTURES = {
     "libero_goal": [
         ("libero_goal_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
     ],
+    "libero_object": [
+        ("libero_object_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
+    ],
     "bridge": [
         ("bridge_orig_1.0.0_lerobot", 1.0, "oxe_bridge"),
     ],
