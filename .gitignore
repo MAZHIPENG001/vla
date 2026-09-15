@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Python package metadata
+*.egg-info/
+dist/
+build/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Pretrained models / checkpoints
+playground/Pretrained_models/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Training outputs
+logs/
+runs/
+wandb/
+outputs/
+checkpoints/
+
+# Cache
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS
+.DS_Store
+Thumbs.db
