@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from deployment.model_server.tools.image_tools import to_pil_preserve
 from vla.training.trainer_utils import initialize_overwatch
 logger = initialize_overwatch(__name__)
 
@@ -15,6 +16,7 @@ from vla.model.framework.base_framework import baseframework
 from vla.model.framework.share_tools import merge_framework_config, populate_layerwise_dit_cfg
 from vla.model.modules.action_model.LayerwiseFM_ActionHeader import LayerwiseFlowmatchingActionHead, get_action_model
 from vla.model.modules.vlm import get_vlm_model
+from vla.training.trainer_utils.trainer_tools import resize_images
 
 # ──────────────────────────────────────────────────────────────────────
 #  Default Config for QwenPI
@@ -159,8 +161,8 @@ class Qwen_PI(baseframework):
         base_hidden = vl_embs_list[-1]
 
         # Step 4: Action Expert Forward and Loss
-        # with torch.autocast("cuda", dtype=torch.float32):
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast("cuda", dtype=torch.float32):
+        # with torch.autocast("cuda", dtype=torch.bfloat16):
             # Label alignment: take the last chunk_len segment
             actions = torch.tensor(
                 np.array(actions), device=base_hidden.device, dtype=base_hidden.dtype
@@ -232,8 +234,8 @@ class Qwen_PI(baseframework):
             else None
         )
         # Step 4: Action Expert Forward and Loss
-        # with torch.autocast("cuda", dtype=torch.float32):
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast("cuda", dtype=torch.float32):
+        # with torch.autocast("cuda", dtype=torch.bfloat16):
             pred_actions = self.action_model.predict_action(
                 vl_embs_list, state, encoder_attention_mask=backbone_attention_mask
             )  # (B, chunk_len, action_dim)
