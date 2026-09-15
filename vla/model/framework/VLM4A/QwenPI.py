@@ -161,8 +161,8 @@ class Qwen_PI(baseframework):
         base_hidden = vl_embs_list[-1]
 
         # Step 4: Action Expert Forward and Loss
-        with torch.autocast("cuda", dtype=torch.float32):
-        # with torch.autocast("cuda", dtype=torch.bfloat16):
+        # with torch.autocast("cuda", dtype=torch.float32):
+        with torch.autocast("cuda", dtype=torch.bfloat16):
             # Label alignment: take the last chunk_len segment
             actions = torch.tensor(
                 np.array(actions), device=base_hidden.device, dtype=base_hidden.dtype
@@ -234,8 +234,8 @@ class Qwen_PI(baseframework):
             else None
         )
         # Step 4: Action Expert Forward and Loss
-        with torch.autocast("cuda", dtype=torch.float32):
-        # with torch.autocast("cuda", dtype=torch.bfloat16):
+        # with torch.autocast("cuda", dtype=torch.float32):
+        with torch.autocast("cuda", dtype=torch.bfloat16):
             pred_actions = self.action_model.predict_action(
                 vl_embs_list, state, encoder_attention_mask=backbone_attention_mask
             )  # (B, chunk_len, action_dim)
