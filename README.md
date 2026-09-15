@@ -13,16 +13,14 @@ uv pip install qwen-vl-utils[decord]==0.0.8
 cd vla
 source .venv/bin/activate
 ```
-
 # 模型存储位置--软连接
 ```bash
-mkdir -p /root/gpufree-data/playground/Pretrained_models
+mkdir -p /root/gpufree-data/playground
 
-ln -s /root/gpufree-data/playground/Pretrained_models \
-      /root/vla/playground/Pretrained_models
-
-ls -lh /root/vla/playground
-readlink -f /root/vla/playground/Pretrained_models
+rm -rf /root/vla/playground
+ln -s /root/gpufree-data/playground /root/vla/playground
+ls -ld /root/vla/playground
+readlink -f /root/vla/playground
 ```
 
 # 验证
