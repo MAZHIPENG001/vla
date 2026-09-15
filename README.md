@@ -29,5 +29,4 @@ readlink -f /root/vla/playground/Pretrained_models
 uv run vla/model/modules/vlm/Qwen.py
 
 uv run vla/model/framework/VLM4A/QwenPI.py
-PYTHONPATH=/root/vla uv run vla/model/framework/VLM4A/QwenPI.py
 ```
