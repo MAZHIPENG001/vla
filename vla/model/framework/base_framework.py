@@ -41,9 +41,9 @@ def _auto_import_framework_modules() -> None:
             for _, sub_name, _ in pkgutil.iter_modules([str(sub_dir)]):
                 if sub_name.startswith("_"):
                     continue
-                importlib.import_module(f"starVLA.model.framework.{module_name}.{sub_name}")
+                importlib.import_module(f"vla.model.framework.{module_name}.{sub_name}")
         else:
-            importlib.import_module(f"starVLA.model.framework.{module_name}")
+            importlib.import_module(f"vla.model.framework.{module_name}")
 
     _FRAMEWORKS_IMPORTED = True
 
