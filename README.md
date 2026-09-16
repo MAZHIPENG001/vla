@@ -16,10 +16,13 @@ uv pip install qwen-vl-utils[decord]==0.0.8
 uv pip install ninja fvcore iopath
 uv pip install huggingface-hub==0.35.3
 uv pip install pyarrow
+uv pip install deepspeed
+uv pip install wandb
 
 uv pip install --no-build-isolation \
   "git+https://github.com/facebookresearch/pytorch3d.git"
 ```
+
 # 激活环境
 ```bash
 cd vla

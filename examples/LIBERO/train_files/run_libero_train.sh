@@ -1,6 +1,8 @@
 
 
-export NCCL_SOCKET_IFNAME=bond0
+#export NCCL_SOCKET_IFNAME=bond0
+export NCCL_SOCKET_IFNAME=eth0
+#ip -br addr
 export NCCL_IB_HCA=mlx5_2,mlx5_3
 
 # used for check save when communication
