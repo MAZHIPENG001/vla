@@ -42,7 +42,7 @@ datasets:
     per_device_batch_size: 16
     load_all_data_for_training: true
 #    video_backend: torchvision_av
-    video_backend: opencv
+    video_backend: pyav
 
 trainer:
   max_train_steps: 100000
