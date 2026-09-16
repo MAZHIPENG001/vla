@@ -156,7 +156,7 @@ if __name__ == "__main__":
     from tqdm import tqdm
     count = 0
     for batch in tqdm(train_dataloader, desc="Processing Batches"):
-        if count > 3:
-            break
+        # if count > 3:
+        #     break
         count += 1
         pass
