@@ -25,7 +25,6 @@ uv pip install --no-build-isolation \
 # Wandb
 ```bash
 https://wandb.ai/authorize?ref=models
-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
 ```
 # 激活环境
 ```bash
