@@ -53,7 +53,7 @@ accelerate launch \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --wandb_project vla_Libero \
-  --wandb_entity mazhipeng \
+  --wandb_entity 1246896046-zhejiang-university-of-technology \
   # --is_debug True
 
 
