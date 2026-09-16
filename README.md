@@ -14,7 +14,7 @@ uv pip install pydantic
 uv pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 uv pip install qwen-vl-utils[decord]==0.0.8
 uv pip install ninja fvcore iopath
-
+uv pip install huggingface-hub==0.35.3
 uv pip install --no-build-isolation \
   "git+https://github.com/facebookresearch/pytorch3d.git"
 ```
@@ -46,10 +46,12 @@ uv run vla/model/framework/VLM4A/QwenGR00T.py
 export DEST=/root/gpufree-data/playground/Datasets
 bash examples/LIBERO/data_preparation.sh
 # or 
-huggingface-cli download IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_spatial_no_noops_1.0.0_lerobot
-huggingface-cli download IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot  --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_object_no_noops_1.0.0_lerobot
-huggingface-cli download IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot    --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_goal_no_noops_1.0.0_lerobot
-huggingface-cli download IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot      --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_10_no_noops_1.0.0_lerobot
+echo "export HF_ENDPOINT=https://hf-mirror.com" >> ~/.bashrc 
+source ~/.bashrc 
+hf download download IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_spatial_no_noops_1.0.0_lerobot
+hf download download IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot  --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_object_no_noops_1.0.0_lerobot
+hf download download IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot    --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_goal_no_noops_1.0.0_lerobot
+hf download download IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot      --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_10_no_noops_1.0.0_lerobot
 
 # Copy modality.json to each subset
 for d in playground/Datasets/LEROBOT_LIBERO_DATA/*/; do
