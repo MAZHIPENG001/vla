@@ -41,6 +41,22 @@ uv run vla/model/framework/VLM4A/QwenPI.py
 uv run vla/model/framework/VLM4A/QwenGR00T.py
 ```
 
+# 示例数据集下载
+```bash
+export DEST=/root/gpufree-data/playground/Datasets
+bash examples/LIBERO/data_preparation.sh
+# or 
+huggingface-cli download IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot --repo-type dataset --local-dir playground/Datasets/LEROBOT_LIBERO_DATA/libero_spatial_no_noops_1.0.0_lerobot
+huggingface-cli download IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot  --repo-type dataset --local-dir playground/Datasets/LEROBOT_LIBERO_DATA/libero_object_no_noops_1.0.0_lerobot
+huggingface-cli download IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot    --repo-type dataset --local-dir playground/Datasets/LEROBOT_LIBERO_DATA/libero_goal_no_noops_1.0.0_lerobot
+huggingface-cli download IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot      --repo-type dataset --local-dir playground/Datasets/LEROBOT_LIBERO_DATA/libero_10_no_noops_1.0.0_lerobot
+
+# Copy modality.json to each subset
+for d in playground/Datasets/LEROBOT_LIBERO_DATA/*/; do
+  cp examples/LIBERO/train_files/modality.json "$d/meta/"
+done
+```
+
 # 数据集验证
 ```bash
 python vla/dataloader/lerobot_datasets.py \
@@ -50,4 +66,8 @@ python vla/dataloader/lerobot_datasets.py \
 # huggingface 模型下载
 ```bash
 huggingface-cli download Qwen/Qwen3-VL-4B-Instruct --local-dir playground/Pretrained_models/Qwen3-VL-4B-Instruct
+```
+# 开始训练
+```bash
+bash examples/LIBERO/train_files/run_libero_train.sh
 ```
