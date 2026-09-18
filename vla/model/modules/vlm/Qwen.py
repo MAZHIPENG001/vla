@@ -73,6 +73,15 @@ class _QWen_VL_Interface(nn.Module):
             outputs = self.model(**kwargs)
         return outputs
 
+    def forward_features(self, **kwargs):
+        """Encode images/text without computing vocabulary logits (e.g. for a critic)."""
+        kwargs.setdefault("use_cache", False)
+        kwargs.setdefault("return_dict", True)
+        with torch.autocast(
+            "cuda", dtype=torch.bfloat16, enabled=self.model.device.type == "cuda"
+        ):
+            return self.model.model(**kwargs)
+
     def generate(self, **kwargs):
         """
         High-level generation interface (auto-regressive decoding), optionally vision-conditioned.
