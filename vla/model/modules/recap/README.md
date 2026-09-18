@@ -11,9 +11,10 @@ PDF 第 V-C 节描述的原始价值模型骨干为 **670M**；这里按需求�
 `recap.py` 的 `QwenRecapDefaultConfig` + `QwenRecap` 参照 `QwenOFT.py` 组织：
 使用独立的顶层 `recap` 节点合并默认值与 YAML，通过 `get_vlm_model` 实际加载 Qwen，
 读取真实隐藏维度，并以 `examples: list[dict]` 作为训练和预测接口。
-配置示例位于 `configs/qwen3_vl_2b.yaml`，支持 YAML 路径、普通 dict 或 OmegaConf。
+配置统一放在仓库外层的 `examples/LIBERO/train_files/starvla_cotrain_libero.yaml`，
+RECAP 模块内不再保存独立 YAML。接口支持任务 YAML 路径、普通 dict 或 OmegaConf。
 `framework` 保留给 VLA 策略；`recap` 配置独立的价值模型和优势计算。
-该 YAML 只含 `recap`，可直接合入已有训练配置，共用其中的 `datasets` 和 `trainer`。
+该任务 YAML 同时包含 `framework`、`recap`、`datasets` 和 `trainer`，由策略和价值模型共同读取。
 RECAP 在内部生成一份适配 Qwen 工厂的局部配置，不改写调用方的 `framework`，
 也不会用策略的模型路径初始化价值模型。
 这是可组合的价值/优势模块，直接用 `QwenRecap(cfg)` 创建；不注册为返回动作的
@@ -67,11 +68,9 @@ from omegaconf import OmegaConf
 from vla.model.framework.base_framework import build_framework
 from vla.model.modules.recap import QwenRecap
 
-# config.yaml 是包含 framework、recap、datasets 等节点的同一份任务配置。
-cfg = OmegaConf.load("config.yaml")
+cfg = OmegaConf.load("examples/LIBERO/train_files/starvla_cotrain_libero.yaml")
 policy = build_framework(cfg)
 recap = QwenRecap(cfg)
-# 或将已有策略 YAML 和本目录的 recap-only YAML 用 OmegaConf.merge 合并后传入。
 ```
 
 旧版 RECAP 示例中 `framework` 下的 `qwenvl/value_model/advantage` 应迁移到 `recap`，
@@ -82,7 +81,7 @@ recap = QwenRecap(cfg)
 from omegaconf import OmegaConf
 from vla.model.modules.recap import QwenRecap
 
-cfg = OmegaConf.load("vla/model/modules/recap/configs/qwen3_vl_2b.yaml")
+cfg = OmegaConf.load("examples/LIBERO/train_files/starvla_cotrain_libero.yaml")
 cfg.recap.qwenvl.base_vlm = "/home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct"
 recap = QwenRecap(cfg).to("cuda")
 
@@ -123,13 +122,14 @@ texts = condition.to_text()
 可选状态、价值损失、反向梯度、价值预测、轨迹优势和条件文本生成：
 
 ```bash
-HF_HUB_OFFLINE=1 .venv/bin/python -m vla.model.modules.recap \
-  --config_yaml vla/model/modules/recap/configs/qwen3_vl_2b.yaml \
+HF_HUB_OFFLINE=1 .venv/bin/python -m vla.model.modules.recap.recap \
+  --config_yaml examples/LIBERO/train_files/starvla_cotrain_libero.yaml \
   --model_id /home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct \
   --device cpu --freeze_backbone --backward
 ```
 
 CPU 测试冻结骨干并对价值头反向传播；小规模 Qwen 单元测试另外覆盖骨干梯度。
+省略 `--config_yaml` 时，入口默认加载上述 LIBERO 任务配置。
 如需在 GPU 验证完整反向传播，改用 `--device cuda --backward`，去掉 `--freeze_backbone`。
 `--checkpoint /path/to/critic.pt` 可测试加载训练后的价值模型。
 不传 `--model_id` 时使用 YAML 指定的 Hub ID；加载远程模型时不要设置 `HF_HUB_OFFLINE=1`。

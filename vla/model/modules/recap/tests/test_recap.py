@@ -72,11 +72,15 @@ class RecapTests(unittest.TestCase):
         model = QwenRecap()
         self.assertEqual(model.config.recap.name, "QwenRecap")
         self.assertEqual(self.load_model.call_args.args[0], "Qwen/Qwen3-VL-2B-Instruct")
-        config_path = Path(__file__).parents[1] / "configs/qwen3_vl_2b.yaml"
+        config_path = Path(__file__).resolve().parents[5] / "examples/LIBERO/train_files/starvla_cotrain_libero.yaml"
+        task_config = OmegaConf.load(config_path)
         from_yaml = QwenRecap(config_path)
         self.assertEqual(from_yaml.config.recap.value_model.num_bins, 201)
-        self.assertNotIn("framework", from_yaml.config)
-        self.assertEqual(from_yaml.config.datasets.vla_data, {})
+        self.assertEqual(self.load_model.call_args.args[0], task_config.recap.qwenvl.base_vlm)
+        self.assertEqual(from_yaml.config.framework, task_config.framework)
+        self.assertEqual(from_yaml.config.datasets, task_config.datasets)
+        self.assertEqual(from_yaml.config.trainer, task_config.trainer)
+        self.assertTrue(torch.isfinite(from_yaml(self.batch)["value_loss"]))
 
     def test_shared_config_runs_policy_and_recap_in_either_load_order(self):
         from vla.model.framework.VLM4A.QwenOFT import Qwenvl_OFT

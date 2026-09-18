@@ -198,6 +198,10 @@ class QwenRecap(nn.Module):
 
 
 if __name__ == "__main__":
+    import argparse
+    import numpy as np
+    from PIL import Image
+
     # # Quick test of the RECAP critic and advantage labeling.
     # import numpy as np
     # from omegaconf import OmegaConf
@@ -211,7 +215,11 @@ if __name__ == "__main__":
 
 
     parser = argparse.ArgumentParser(description="Load and smoke-test the configured RECAP value component.")
-    parser.add_argument("--config_yaml", default=str(Path(__file__).parent / "configs/qwen3_vl_2b.yaml"))
+    parser.add_argument(
+        "--config_yaml",
+        default=str(Path(__file__).resolve().parents[4] / "examples/LIBERO/train_files/starvla_cotrain_libero.yaml"),
+        help="Shared task YAML containing framework, recap, datasets and trainer.",
+    )
     parser.add_argument("--model_id", help="Override the HF model ID or local backbone directory.")
     parser.add_argument("--checkpoint", help="Optional trained QwenValueModel state_dict.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

@@ -17,6 +17,26 @@ framework:
     state_dim: 7
     action_horizon: 8
 
+# RECAP critic and advantage labeling share this task config with the VLA policy.
+recap:
+  name: QwenRecap
+  qwenvl:
+    base_vlm: Qwen/Qwen3-VL-2B-Instruct
+    attn_implementation: sdpa
+  value_model:
+    num_bins: 201
+    value_min: -1.0
+    value_max: 0.0
+    freeze_backbone: false
+    checkpoint: null  # Optional trained QwenValueModel.state_dict().
+  advantage:
+    mode: posttrain
+    n_steps: 50
+    positive_fraction: null  # 40% posttrain; 30% pretrain/return_to_go.
+    dropout_probability: 0.3
+    prediction_batch_size: 8
+    thresholds: {}  # Calibrate with fit_thresholds before generating conditions.
+
 datasets:
   vlm_data:
     dataset_py: vlm_datasets
