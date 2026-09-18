@@ -39,6 +39,7 @@ class QwenValueModel(nn.Module):
         value_min: float = -1.0,
         value_max: float = 0.0,
         freeze_backbone: bool = False,
+        config=None,
     ) -> None:
         super().__init__()
         if not isinstance(num_bins, int) or isinstance(num_bins, bool) or num_bins < 2:
@@ -48,16 +49,37 @@ class QwenValueModel(nn.Module):
 
         # Lazy imports keep the standalone advantage helpers usable without a VLM.
         from omegaconf import OmegaConf
-        from vla.model.modules.vlm.Qwen import _QWen_VL_Interface
+        from vla.model.modules.vlm import get_vlm_model
 
-        config = OmegaConf.create({
-            "framework": {"qwenvl": {
-                "base_vlm": model_id,
-                "attn_implementation": attn_implementation,
-            }},
-            "datasets": {"vla_data": {}},
-        })
-        self.qwen_vl_interface = _QWen_VL_Interface(config)
+        # Only recap.qwenvl configures the critic. Qwen's existing factory expects
+        # framework.qwenvl, so adapt into a private config without changing the
+        # full shared config or accidentally loading the policy backbone.
+        if config is None:
+            backbone_config = OmegaConf.create({
+                "framework": {"qwenvl": {
+                    "base_vlm": model_id,
+                    "attn_implementation": attn_implementation,
+                }},
+                "datasets": {"vla_data": {}},
+            })
+        else:
+            from vla.model.framework.share_tools import _to_omegaconf
+
+            config = _to_omegaconf(getattr(config, "_cfg", config))
+            qwenvl = OmegaConf.select(config, "recap.qwenvl")
+            if qwenvl is None:
+                raise ValueError("value model config requires recap.qwenvl; framework.qwenvl belongs to the policy")
+            # Resolve while nodes still belong to the full config, so references
+            # to shared top-level fields (e.g. a model root) continue to work.
+            datasets = OmegaConf.select(config, "datasets", default=OmegaConf.create({}))
+            backbone_config = OmegaConf.create({
+                "framework": {"qwenvl": OmegaConf.to_container(qwenvl, resolve=True)},
+                "datasets": OmegaConf.to_container(datasets, resolve=True),
+            })
+            backbone_config = OmegaConf.merge({"datasets": {"vla_data": {}}}, backbone_config)
+        self.qwen_vl_interface = get_vlm_model(backbone_config)
+        if self.qwen_vl_interface is None:
+            raise ValueError("RECAP requires a Qwen VLM backbone")
         backbone = self.qwen_vl_interface.model
         self.value_head = nn.Linear(backbone.config.hidden_size, num_bins)
         self.value_head.to(device=backbone.device)  # Keep the small head in float32.

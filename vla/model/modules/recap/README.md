@@ -6,6 +6,135 @@
 PDF 第 V-C 节描述的原始价值模型骨干为 **670M**；这里按需求改用 Qwen3-VL 2B。
 提供可反向传播的价值训练损失，但没有自动修改现有策略训练器或启动训练任务。
 
+## 与 QwenOFT 一致的配置和批输入接口
+
+`recap.py` 的 `QwenRecapDefaultConfig` + `QwenRecap` 参照 `QwenOFT.py` 组织：
+使用独立的顶层 `recap` 节点合并默认值与 YAML，通过 `get_vlm_model` 实际加载 Qwen，
+读取真实隐藏维度，并以 `examples: list[dict]` 作为训练和预测接口。
+配置示例位于 `configs/qwen3_vl_2b.yaml`，支持 YAML 路径、普通 dict 或 OmegaConf。
+`framework` 保留给 VLA 策略；`recap` 配置独立的价值模型和优势计算。
+该 YAML 只含 `recap`，可直接合入已有训练配置，共用其中的 `datasets` 和 `trainer`。
+RECAP 在内部生成一份适配 Qwen 工厂的局部配置，不改写调用方的 `framework`，
+也不会用策略的模型路径初始化价值模型。
+这是可组合的价值/优势模块，直接用 `QwenRecap(cfg)` 创建；不注册为返回动作的
+`build_framework` 策略，也不将 `value_loss` 命名为 `action_loss`。
+
+| 配置项 | 默认值 | 作用 |
+| --- | --- | --- |
+| `recap.qwenvl.base_vlm` | `Qwen/Qwen3-VL-2B-Instruct` | Hub ID 或完整本地权重目录 |
+| `recap.qwenvl.attn_implementation` | `sdpa` | 注意力实现 |
+| `recap.value_model.num_bins` | `201` | 价值分类档数 |
+| `recap.value_model.value_min/value_max` | `-1/0` | 归一化价值范围 |
+| `recap.value_model.freeze_backbone` | `false` | 是否仅训练价值头 |
+| `recap.value_model.checkpoint` | `null` | 训练好的价值模型 state_dict 路径 |
+| `recap.advantage.mode` | `posttrain` | 优势估计公式 |
+| `recap.advantage.n_steps` | `50` | 后训练前瞻步数 |
+| `recap.advantage.positive_fraction` | `null` | 自动按阶段选择 30% / 40% |
+| `recap.advantage.dropout_probability` | `0.3` | 训练时的条件丢弃概率 |
+| `recap.advantage.prediction_batch_size` | `8` | 轨迹标注时每批观测数 |
+| `recap.advantage.thresholds` | `{}` | 各任务已校准的阈值 |
+| `datasets.vla_data.obs_image_size` | 从共享配置读取，可省略 | 训练、预测共用的图像大小，宽/高 |
+
+同一份配置可同时创建策略和 RECAP，例如：
+
+```yaml
+framework:
+  name: QwenOFT
+  qwenvl:
+    base_vlm: Qwen/Qwen3-VL-4B-Instruct
+    attn_implementation: sdpa
+  action_model:
+    action_horizon: 8
+    action_dim: 7
+
+recap:
+  name: QwenRecap
+  qwenvl:
+    base_vlm: Qwen/Qwen3-VL-2B-Instruct
+    attn_implementation: sdpa
+  value_model:
+    num_bins: 201
+  advantage:
+    n_steps: 50
+
+datasets:
+  vla_data:
+    obs_image_size: [224, 224]
+```
+
+```python
+from omegaconf import OmegaConf
+from vla.model.framework.base_framework import build_framework
+from vla.model.modules.recap import QwenRecap
+
+# config.yaml 是包含 framework、recap、datasets 等节点的同一份任务配置。
+cfg = OmegaConf.load("config.yaml")
+policy = build_framework(cfg)
+recap = QwenRecap(cfg)
+# 或将已有策略 YAML 和本目录的 recap-only YAML 用 OmegaConf.merge 合并后传入。
+```
+
+旧版 RECAP 示例中 `framework` 下的 `qwenvl/value_model/advantage` 应迁移到 `recap`，
+策略原有的 `framework` 节点保留。运行时价值头维度与阈值写入 `recap.config.recap`；
+`recap.config` 保留完整的共享配置副本，可以一并保存策略和 RECAP 配置。
+
+```python
+from omegaconf import OmegaConf
+from vla.model.modules.recap import QwenRecap
+
+cfg = OmegaConf.load("vla/model/modules/recap/configs/qwen3_vl_2b.yaml")
+cfg.recap.qwenvl.base_vlm = "/home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct"
+recap = QwenRecap(cfg).to("cuda")
+
+# batch 中每项包含：image（PIL/NumPy 图片或多相机图片列表）、lang（任务指令）、
+# return（归一化的剩余轨迹回报）；可选 state 为 [1, state_dim] 的已归一化状态。
+# 样例：{"image": [camera_image], "lang": "Close the box.", "return": -0.4}
+recap.train()
+loss = recap(batch)["value_loss"]
+loss.backward()
+# 实际训练循环还需 optimizer.step() 和梯度清零。
+
+recap.eval()
+values = recap.predict_value(batch)["values"]  # [观测数]，预测无需 return 标签
+
+# episodes 为 list[list[example]]，每条仅放有效观测，包含终止样本。
+# rewards 为 [轨迹数, 最大步数] 的归一化奖励，右侧可以 padding。
+result = recap.predict_advantages(episodes, rewards)
+# task_ids: 与 result["advantages"] 同形状、同设备的整数任务编号。
+# 在代表性校准数据上拟合一次；不要在每个策略 minibatch 上重新拟合。
+recap.fit_thresholds(result["advantages"], task_ids, valid_mask=result["valid_mask"])
+condition = recap.make_condition(
+    result["advantages"], task_ids, valid_mask=result["valid_mask"],
+    intervention_mask=intervention_mask,  # 同形状 bool，人类纠正的位置
+)
+texts = condition.to_text()
+```
+
+`recap.train()` / `recap.eval()` 控制条件 dropout；预测价值始终临时使用 eval 模式。
+`fit_thresholds` 写入 `recap.config.recap.advantage.thresholds`，可通过
+`OmegaConf.save(recap.config, "calibrated.yaml")` 保存后复用。
+用 `torch.save(recap.value_model.state_dict(), "critic.pt")` 保存完整价值模型，
+然后将 `recap.value_model.checkpoint` 设为此文件路径即可严格恢复权重；
+档数和价值范围需与训练时一致。
+
+### 实际权重加载测试
+
+在仓库根目录运行下列命令。该入口真实加载本地 2B 权重和处理器，测试两个不同长度指令、
+可选状态、价值损失、反向梯度、价值预测、轨迹优势和条件文本生成：
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python -m vla.model.modules.recap \
+  --config_yaml vla/model/modules/recap/configs/qwen3_vl_2b.yaml \
+  --model_id /home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct \
+  --device cpu --freeze_backbone --backward
+```
+
+CPU 测试冻结骨干并对价值头反向传播；小规模 Qwen 单元测试另外覆盖骨干梯度。
+如需在 GPU 验证完整反向传播，改用 `--device cuda --backward`，去掉 `--freeze_backbone`。
+`--checkpoint /path/to/critic.pt` 可测试加载训练后的价值模型。
+不传 `--model_id` 时使用 YAML 指定的 Hub ID；加载远程模型时不要设置 `HF_HUB_OFFLINE=1`。
+测试使用合成图片和标签，只验证代码链路，不代表新价值头已经学会任务价值。
+
 ## Qwen3-VL 2B 价值模型
 
 `QwenValueModel` 默认加载模型 ID `Qwen/Qwen3-VL-2B-Instruct`，也接受本地完整权重目录。
@@ -144,3 +273,5 @@ print(condition.to_text())           # 展平为 8 个字符串，丢弃或 padd
 严格阈值、人工纠正、条件 dropout 和混合精度累计；CUDA 可用时额外验证设备一致性。
 价值模型测试使用随机初始化的小规模真实 Qwen3-VL，验证多模态前向、视觉/语言骨干
 和价值头梯度、冻结模式、左右 padding、价值监督离散化与 checkpoint 恢复，无需下载 2B 权重。
+配置与组件测试额外覆盖 YAML 覆盖优先级、模型路径实际传递、真实隐藏维度、状态与图像预处理、
+按批预测和变长轨迹回填、阈值配置保存/恢复，以及训练权重加载与配置不一致检查。

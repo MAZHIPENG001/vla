@@ -1,0 +1,20 @@
+# Merge this recap-only fragment into the same config as the VLA framework.
+recap:
+  name: QwenRecap
+  qwenvl:
+    # May be overridden by --model_id for a local complete checkpoint directory.
+    base_vlm: Qwen/Qwen3-VL-2B-Instruct
+    attn_implementation: sdpa
+  value_model:
+    num_bins: 201
+    value_min: -1.0
+    value_max: 0.0
+    freeze_backbone: false
+    checkpoint: null  # Optional torch.save(recap.value_model.state_dict(), path).
+  advantage:
+    mode: posttrain
+    n_steps: 50
+    positive_fraction: null  # 40% posttrain; 30% pretrain/return_to_go.
+    dropout_probability: 0.3
+    prediction_batch_size: 8
+    thresholds: {}  # Calibrate with fit_thresholds before generating conditions.
