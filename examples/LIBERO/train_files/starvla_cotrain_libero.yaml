@@ -21,7 +21,7 @@ framework:
 recap:
   name: QwenRecap
   qwenvl:
-    base_vlm: Qwen/Qwen3-VL-2B-Instruct
+    base_vlm: ./playground/Pretrained_models/Qwen3-VL-2B-Instruct
     attn_implementation: sdpa
   value_model:
     num_bins: 201

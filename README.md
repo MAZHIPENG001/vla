@@ -2,6 +2,8 @@
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
+echo 'export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple' >> ~/.bashrc
+source ~/.bashrc
 uv sync
 uv pip install ninja packaging
 uv pip install flash-attn --no-build-isolation
@@ -28,8 +30,8 @@ https://wandb.ai/authorize?ref=models
 ```
 # 激活环境
 ```bash
-cd vla
-source .venv/bin/activate
+source ~/vla/.venv/bin/activate
+export PYTHONPATH=~/vla:$PYTHONPATH
 ```
 # 模型存储位置--软连接
 ```bash
@@ -49,13 +51,14 @@ uv run vla/model/framework/VLM4A/QwenPI.py
 uv run vla/model/framework/VLM4A/QwenGR00T.py
 ```
 
-# 示例数据集下载
+# 示例数据集下载 -- LIBERO
 ```bash
 export DEST=/root/gpufree-data/playground/Datasets
 bash examples/LIBERO/data_preparation.sh
 # or 
 echo "export HF_ENDPOINT=https://hf-mirror.com" >> ~/.bashrc 
 source ~/.bashrc 
+
 hf download IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_spatial_no_noops_1.0.0_lerobot
 hf download IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot  --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_object_no_noops_1.0.0_lerobot
 hf download IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot    --repo-type dataset --local-dir /root/gpufree-data/playground/Datasets/LEROBOT_LIBERO_DATA/libero_goal_no_noops_1.0.0_lerobot
@@ -75,6 +78,7 @@ python vla/dataloader/lerobot_datasets.py \
 
 # huggingface 模型下载
 ```bash
+cd /root/gpufree-data
 huggingface-cli download Qwen/Qwen3-VL-4B-Instruct --local-dir playground/Pretrained_models/Qwen3-VL-4B-Instruct
 ```
 # 开始训练

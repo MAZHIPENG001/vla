@@ -202,18 +202,6 @@ if __name__ == "__main__":
     import numpy as np
     from PIL import Image
 
-    # # Quick test of the RECAP critic and advantage labeling.
-    # import numpy as np
-    # from omegaconf import OmegaConf
-
-    # config = OmegaConf.structured(QwenRecapDefaultConfig())
-    # recap = QwenRecap(config)
-    # print("RECAP initialized with config:", recap.config)
-    # print("Value model parameters:", sum(p.numel() for p in recap.value_model.parameters()))
-
-
-
-
     parser = argparse.ArgumentParser(description="Load and smoke-test the configured RECAP value component.")
     parser.add_argument(
         "--config_yaml",
@@ -239,11 +227,12 @@ if __name__ == "__main__":
     if args.freeze_backbone:
         OmegaConf.update(cfg, "recap.value_model.freeze_backbone", True)
     model = QwenRecap(cfg).to(args.device)
-    print(f"[load] backbone={model.config.recap.qwenvl.base_vlm}, "
+    print(f"\33[92m[load] backbone={model.config.recap.qwenvl.base_vlm}, "
             f"hidden_size={model.config.recap.value_model.hidden_size}, "
-            f"bins={model.value_model.bin_values.numel()}, device={args.device}")
+            f"bins={model.value_model.bin_values.numel()}, device={args.device}\33[0m]")
 
-    image = Image.new("RGB", (64, 64), color=(96, 128, 160))
+    # image = Image.new("RGB", (224, 224), color=(96, 128, 160))
+    image = Image.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
     batch = [
         {"image": [image], "lang": "Close the box.", "return": -0.5},
         {"image": [image], "lang": "Fold the shirt and put it on the table.",
@@ -253,7 +242,7 @@ if __name__ == "__main__":
     with torch.set_grad_enabled(args.backward):
         loss = model(batch)["value_loss"]
     assert loss.ndim == 0 and torch.isfinite(loss), "nonfinite value training loss"
-    print(f"[train] value_loss={loss.item():.6f}")
+    print(f"\33[93m[train] value_loss={loss.item():.6f}\33[0m")
     if args.backward:
         loss.backward()
         grad = model.value_model.value_head.weight.grad
