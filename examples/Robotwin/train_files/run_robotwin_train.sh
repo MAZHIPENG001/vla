@@ -1,20 +1,24 @@
-export NCCL_SOCKET_IFNAME=bond0
+#ip -br addr
+#export NCCL_SOCKET_IFNAME=bond0
+export NCCL_SOCKET_IFNAME=eth0
+
 export NCCL_IB_HCA=mlx5_2,mlx5_3
 
 # used for check save when communication
 export NCCL_BLOCKING_WAIT=1
 export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_TIMEOUT=1000  # timeout set to 1 hour (unit: seconds)
-
+export NCCL_TIMEOUT=10000  # timeout set to 1 hour (unit: seconds)
+export NCCL_SOCKET_TIMEOUT_MS=360000
 ###########################################################################################
 # === Please modify the following paths according to your environment ===
 Framework_name=QwenOFT
-freeze_module_list=''
+freeze_module_list='qwen_vl_interface'
 base_vlm=playground/Pretrained_models/Qwen3-VL-4B-Instruct
 config_yaml=./examples/Robotwin/train_files/starvla_cotrain_robotwin_abs.yaml
-run_root_dir=./results/Checkpoints
+
 data_mix=robotwin_all_50
-run_id=0129_${data_mix}_qwen3OFT_all
+run_root_dir=/root/gpufree-data/results
+run_id=time_20260916
 # === End of environment variable configuration ===
 ###########################################################################################
 
@@ -27,10 +31,12 @@ mkdir -p ${output_dir}
 cp $0 ${output_dir}/
 
 
+num_processes=${NUM_PROCESSES:-$(nvidia-smi -L | wc -l)}
+
 accelerate launch \
-  --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 8 \
-  starVLA/training/train_starvla.py \
+  --config_file vla/config/deepseeds/deepspeed_zero2.yaml \
+  --num_processes ${num_processes} \
+  vla/training/train_starvla.py \
   --config_yaml ${config_yaml} \
   --framework.name ${Framework_name} \
   --framework.qwenvl.base_vlm ${base_vlm} \

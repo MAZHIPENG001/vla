@@ -1,4 +1,3 @@
-
 #ip -br addr
 #export NCCL_SOCKET_IFNAME=bond0
 export NCCL_SOCKET_IFNAME=eth0
@@ -30,7 +29,6 @@ output_dir=${run_root_dir}/${run_id}
 mkdir -p ${output_dir}
 # mv this script to the output dir
 cp $0 ${output_dir}/
-
 
 num_processes=${NUM_PROCESSES:-$(nvidia-smi -L | wc -l)}
 
