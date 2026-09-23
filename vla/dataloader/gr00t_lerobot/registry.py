@@ -124,7 +124,7 @@ def discover_and_merge() -> None:
     for registry_dir in _find_registry_dirs():
         bench_name = registry_dir.parents[1].name  # examples/<BenchName>/train_files/data_registry
         prefix = f"_data_registry_{bench_name}"
-
+        # print(f"\33[92mregistry_dir={registry_dir}, prefix={prefix}\33[0m")
         # --- data_config.py (may contain all three registries) ---
         cfg_file = registry_dir / "data_config.py"
         if cfg_file.is_file():

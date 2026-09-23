@@ -1,8 +1,8 @@
 run_id: qwenact
 run_root_dir: results/Checkpoints
 seed: 42
-wandb_entity: your_wandb_entity
-wandb_project: llavavla
+wandb_entity: 1246896046-zhejiang-university-of-technology
+wandb_project: vla_robotwin
 is_debug: false
 version_id: "0.21"
 
