@@ -139,7 +139,7 @@ class _QWen_VL_Interface(nn.Module):
         )
         print(output_text)
 
-    def build_qwenvl_inputs(self, images, instructions, solutions=None, **kwargs):
+    def build_qwenvl_inputs(self, images, instructions, solutions=None, instruction_suffixes=None, **kwargs):
         """
         Build model inputs from raw data (images + instructions + optional solutions).
         Follow Oficial Qwen3.5-VL Instruct format: https://huggingface.co/Qwen/Qwen3.5-VL-4B-Instruct
@@ -148,7 +148,9 @@ class _QWen_VL_Interface(nn.Module):
         # Create messages: one message per sample
         messages = []
         assert len(images) == len(instructions), "Images and instructions must have the same length"
-        for imgs, instruction in zip(images, instructions):
+        if instruction_suffixes is not None and len(instruction_suffixes) != len(instructions):
+            raise ValueError("instruction_suffixes must match the instruction batch length")
+        for index, (imgs, instruction) in enumerate(zip(images, instructions)):
             content = [{"type": "image", "image": img} for img in imgs]
 
             if "CoT_prompt" in self.config.datasets.vla_data:  # If using a grounding prompt to task
@@ -156,6 +158,10 @@ class _QWen_VL_Interface(nn.Module):
                 prompt = CoT_prompt.replace("{instruction}", instruction)
             else:
                 prompt = instruction
+
+            # Append after the complete task template and before action queries.
+            if instruction_suffixes is not None:
+                prompt += instruction_suffixes[index]
 
             content.append({"type": "text", "text": prompt})
             msg = [{"role": "user", "content": content}]

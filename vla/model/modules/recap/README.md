@@ -4,7 +4,7 @@
 本模块包含基于 `Qwen/Qwen3-VL-2B-Instruct` 的价值模型，以及优势和 VLA 条件文本的计算。
 价值模型复用 `vla/model/modules/vlm/Qwen.py` 的加载、图像预处理和对话模板接口。
 PDF 第 V-C 节描述的原始价值模型骨干为 **670M**；这里按需求改用 Qwen3-VL 2B。
-提供可反向传播的价值训练损失，但没有自动修改现有策略训练器或启动训练任务。
+提供可反向传播的价值训练损失，以及 examples/LIBERO 下的独立价值训练和离线标注入口；两者共用外部任务 YAML。
 
 ## 与 QwenOFT 一致的配置和批输入接口
 
@@ -275,3 +275,319 @@ print(condition.to_text())           # 展平为 8 个字符串，丢弃或 padd
 和价值头梯度、冻结模式、左右 padding、价值监督离散化与 checkpoint 恢复，无需下载 2B 权重。
 配置与组件测试额外覆盖 YAML 覆盖优先级、模型路径实际传递、真实隐藏维度、状态与图像预处理、
 按批预测和变长轨迹回填、阈值配置保存/恢复，以及训练权重加载与配置不一致检查。
+
+## Advantage 条件策略：QwenOFTRecap
+
+下一步策略已实现于 `vla/model/framework/VLM4A/QwenOFTRecap.py`，注册名称为
+`QwenOFTRecap`，继承原 `QwenOFT` 的动作查询、MLP 动作头、L1 loss 和预测接口。
+任务配置位于 `examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`：
+`framework` 配置策略，`recap` 配置独立价值模型，仍共用一份任务 YAML。
+新策略自身不加载价值模型；使用相同骨干、动作维度与 horizon 时可加载原 OFT 的 state_dict。
+
+策略输入顺序为：图像 + 完整任务提示/状态 → 可选子任务文本 → Advantage 条件 → 动作查询。
+条件只影响后面的动作查询；CoT_prompt 模板先完成展开，条件和动作查询再追加。
+这里保留 OFT 的 L1 动作回归，不包含 flow matching、子任务生成训练或 CFG 动作混合。
+
+训练样本保留原来的 `image/lang/state/action` 字段，新增：
+
+- `advantage_indicator`：严格的 bool 正/负优势标签，不能直接填连续优势分数。
+- `is_intervention`：可选 bool，人类纠正强制为正，随后仍可丢弃条件。
+- `subtask`：可选子任务文本，若有则放在 Advantage 之前。
+
+```python
+from omegaconf import OmegaConf
+from vla.model.framework.base_framework import build_framework
+
+cfg = OmegaConf.load("examples/LIBERO/train_files/starvla_oft_recap_libero.yaml")
+policy = build_framework(cfg).to("cuda")
+# batch 中每个样本须含 advantage_indicator=True/False，和 OFT 的图像、指令、动作。
+policy.train()
+loss = policy(batch)["action_loss"]
+loss.backward()
+
+policy.eval()
+actions = policy.predict_action(batch)["normalized_actions"]  # 默认正优势条件
+negative = policy.predict_action(batch, advantage="negative")["normalized_actions"]
+unconditional = policy.predict_action(batch, advantage="unconditional")["normalized_actions"]
+```
+
+`framework.advantage_conditioning` 包含：
+
+- `dropout_probability: 0.3`：直接传标签时，训练以 30% 概率删去条件文本。
+- `sft_positive: false`：设为 true 时，直接标签模式下将全部示范视为正；只用于示范 SFT。
+- `inference_condition: positive`：部署默认正优势，可选 negative/unconditional。
+
+已通过 RECAP 计算条件时，也可以直接传入 `AdvantageCondition`：
+
+```python
+from vla.model.modules.recap import AdvantageCondition
+
+# result 是 recap.predict_advantages 的结果；condition 是 recap.make_condition 的结果。
+# 只取 valid_mask=True 的观测，batch 必须保持与此索引完全一致的顺序。
+valid = result["valid_mask"]
+flat_condition = AdvantageCondition(
+    condition.indicator[valid], condition.conditioning_mask[valid],
+)
+loss = policy(batch, advantage_condition=flat_condition)["action_loss"]
+```
+
+外部条件的保留掩码由调用方决定，策略不会再次 dropout；`sft_positive` 也不覆盖外部条件。
+评估数据损失时，先用 `recap.eval()` 生成无 dropout 的外部条件。
+缺少训练标签会报错，避免把未标注 rollout 当成正样本。训练配置默认要求已标注数据；
+LeRobot 数据加载器已支持从标签文件或 Parquet 读取这些字段；标签仍需提前离线生成。
+
+真实权重测试（可用本地 2B 做接口验证，部署策略尺寸由 framework 独立指定）：
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python -m examples.LIBERO.test_oft_recap \
+  --model_id /home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct \
+  --freeze_backbone --backward
+```
+
+该测试真实加载权重和处理器，验证正负标签训练、动作头反向传播和三种推理条件。
+随机动作头尚未经过机器人任务训练；测试成功不代表策略表现有所提升。
+
+## 数据加载器中的优势标签
+
+通常不需要重新采集。已有完整轨迹可复用：先取得成功/失败或其他奖励信息，
+用训练好的价值模型计算优势，再离线补标签。成功示范可先做全正条件 SFT；
+全正标签不是模型估计出来的优势，不能替代 rollout 的正负优势标注。
+后续在线改进通常需要新增策略 rollout，目的是覆盖新策略遇到的状态。
+
+`datasets.vla_data.advantage_labels` 控制读取方式，配置位于外层
+`examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`：
+
+```yaml
+datasets:
+  vla_data:
+    advantage_labels:
+      source: sidecar
+      path: meta/advantage_labels.jsonl
+```
+
+每个单数据集目录放自己的标签文件。例如：
+`<data_root_dir>/<data_name>/meta/advantage_labels.jsonl`。路径相对于各数据集根目录，
+混合训练时不同数据集可以有相同 episode_index。每行示例：
+
+```json
+{"episode_index": 7, "frame_index": 0, "advantage_indicator": false}
+{"episode_index": 7, "frame_index": 1, "advantage_indicator": true, "is_intervention": false}
+```
+
+标签对应原轨迹中当前观测/动作块起点的帧位置（从 0 开始），不是打乱后的样本序号，
+也不是 action chunk 的最后一帧。单数据集与混合采样路径都会在图像/动作变换完成后添加：
+
+- `advantage_indicator`：Python bool；人工干预样本强制为 true。
+- `is_intervention`：Python bool，未提供时为 false。
+- `dataset_name / episode_index / frame_index`：便于核对标签来源。
+
+`collate_fn` 已保留整个样本字典，最终可直接调用 `policy(batch)`。
+文件缺失、重复索引、缺失帧、非 bool 标签会报错；混合采样不会通过随机重试跳过坏标签。
+标签文件不保存 dropout 掩码，训练时由 Policy 随机丢弃条件。
+
+如果原始 LeRobot Parquet 已有布尔标签列，可使用：
+
+```yaml
+advantage_labels:
+  source: parquet
+  column: advantage_indicator
+  intervention_column: is_intervention  # 可省略此列，默认 false
+```
+
+此时从当前轨迹 DataFrame 的原始行读取，并校验已有的 episode_index/frame_index。
+原始 Parquet 的读取仍需要项目数据链路对应的 Parquet 引擎（如 pyarrow）。
+普通旧策略或纯示范 SFT 可设 `source: none`（未配置时也是 none）。
+示范 SFT 还需设置 `framework.advantage_conditioning.sft_positive: true`；
+默认配置 source=sidecar 要求先生成标签文件。
+
+离线标注结果可通过导出接口写入，不修改原始视频或动作：
+
+```python
+from pathlib import Path
+from vla.dataloader.advantage_labels import write_advantage_labels
+
+# recap 是训练完成并恢复 checkpoint 的价值模型；阈值应先在校准数据上确定。
+# episodes 是同一个单数据集的完整观测轨迹，episode_ids 为它们在原数据中的 ID。
+# rewards、task_ids、interventions 均为 [B,T]，task_ids 为整数，interventions 为 bool。
+recap.eval()
+result = recap.predict_advantages(episodes, rewards)
+device = result["advantages"].device
+condition = recap.make_condition(
+    result["advantages"], task_ids.to(device),
+    valid_mask=result["valid_mask"], intervention_mask=interventions.to(device),
+)
+labels = condition.indicator.cpu()
+valid = result["valid_mask"].cpu()
+corrections = interventions.cpu()
+records = (
+    {
+        "episode_index": int(episode_ids[b]),
+        "frame_index": t,
+        "advantage_indicator": bool(labels[b, t]),
+        "is_intervention": bool(corrections[b, t]),
+    }
+    for b in range(len(episodes))
+    for t in range(labels.shape[1])
+    if bool(valid[b, t])
+)
+write_advantage_labels(Path(dataset_root) / "meta/advantage_labels.jsonl", records)
+```
+
+需对该单数据集全部将被采样的轨迹/帧生成记录，或先汇总所有标注批次再导出；
+不要只保存最后一个 minibatch。导出默认拒绝覆盖文件。
+价值模型/阈值更新后应重新标注并使用新文件（或显式 `overwrite=True`），随后重建
+DataLoader/worker；已启动的 worker 不会热更新内存中的标签。
+
+验证命令：
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s vla/model/modules/recap/tests -v
+```
+
+数据测试覆盖原始帧对齐、同 ID 多数据集混合采样、布尔类型、Parquet 行标签逻辑、
+缺失标签不重试，以及 DataLoader → collate → QwenOFTRecap → loss.backward 的链路。
+
+## 完整价值训练与离线标注入口
+
+新增入口位于 examples，两个阶段与策略训练共用
+`examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`：
+
+- `python -m examples.LIBERO.train_recap_value`：完整轨迹 → 剩余回报 → 价值训练／验证 → checkpoint。
+- `python -m examples.LIBERO.label_recap_advantages`：训练好的 checkpoint → 连续优势 → 任务阈值 → 数据集标签。
+- 公共数据适配在 `vla/dataloader/recap_dataset.py`，CLI 和 checkpoint 工具在 `examples/LIBERO/recap_utils.py`。
+
+两个入口仅支持单进程 CPU／单 GPU；请直接用 `python -m`，不要用 torchrun。
+策略网络不参与价值训练，也不会占用这一步的显存。完整 2B 主干训练仍需足够显存；
+`recap.value_model.freeze_backbone: true` 可只训练价值头。
+
+### 1. 准备轨迹结果和奖励配置
+
+默认在每个 LeRobot 数据集根目录放 `meta/recap_episodes.jsonl`，每条轨迹恰好一行：
+
+```jsonl
+{"episode_index": 0, "success": true, "complete": true}
+{"episode_index": 1, "success": false, "complete": true}
+```
+
+这里的 complete 表示轨迹已经真正结束。最后一条存储的 observation 被视为终止样本；
+成功终止奖励为 0，失败终止奖励为负的 failure_penalty，其他时刻为 -1。
+如果原数据最后一行仍然是终止前 observation，需要先对齐终止语义／补齐终止观测。
+截断轨迹不能直接套用终止 Monte Carlo 标签。只有图像和动作、没有任务结果时，
+脚本不会猜测成功与否。
+
+也支持以下显式选择：
+
+- `recap.data.success_source: column`：读取每条轨迹最后一行的
+  `recap.data.success_column`，默认 `success`，必须是布尔值。
+- `recap.data.success_source: all_success`：仅适用于你已确认全部完整且成功的演示数据。
+- `recap.data.truncated_column`：可指定截断标志列，发现 true 就拒绝处理。
+- `recap.data.intervention_column`：可指定逐帧布尔人工接管列，对应标签强制为 positive；
+  未指定时视为无接管，指定后缺列会报错。
+
+任务由 `recap.data.task_column`（默认 task_index）识别，同一轨迹必须只有一个任务。
+内部任务键为 `数据集名称:任务ID`，避免不同数据集的局部 task_index 冲突。
+frame_index 必须从 0 连续递增；脚本按原始轨迹读取所有帧，不使用策略的随机混合采样或删帧结果。
+图像／状态／文本复用原有加载与归一化，变换置为 eval；带未来观测的窗口会被拒绝。
+主干只接收图像、语言和可选状态，不接收动作、成功标志或未来回报。
+
+共享 YAML 的两个奖励参数必须先填写：
+
+```yaml
+recap:
+  reward:
+    failure_penalty: 100   # 仅为配置示例，不是论文统一参数
+    normalization: 1000   # 仅当全部回报都落在 [-1, 0] 时才适用
+    task_overrides: {}
+```
+
+所有奖励先除以 normalization，然后从轨迹尾部累计得到每帧 return。
+对长度 L 的失败轨迹，初始回报是 `-(L - 1 + failure_penalty) / normalization`。
+尺度在同一任务内固定，训练与标注一致；超出价值支持范围会报错，不会静默截断。
+不同任务可在 `task_overrides` 下按 `"数据集名称:任务ID"`
+设置各自的 failure_penalty、normalization。默认 null 是必填占位，不能直接开始训练。
+
+### 2. 检查元数据并训练
+
+从仓库根目录执行。以下命令假设已经在共享 YAML 填好奖励配置和路径：
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m examples.LIBERO.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --check_data
+
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m examples.LIBERO.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
+```
+
+`--check_data` 读取轨迹表并验证结果、索引和回报，不加载 Qwen，也不逐帧解码视频。
+底层 LeRobot 读取需要 Parquet 引擎（如 pyarrow）和配置的视频后端（本例 pyav）。
+缺少数据、结果清单或依赖时必须先补齐。
+
+训练参数都在 `recap.training`，独立于策略的 `trainer`：
+batch_size、max_steps（优化器更新次数）、gradient_accumulation_steps、
+learning_rate、validation_fraction、eval_interval、save_interval 等。
+每个任务按完整轨迹划分验证集，避免相邻帧泄漏；只有一条轨迹的任务保留在训练集。
+如果整个数据集都无法划出验证轨迹，会报错；可明确设置 validation_fraction: 0 关闭验证。
+训练均匀采样所有训练帧，不使用策略数据混合器的采样权重。
+
+默认产物：
+
+```text
+playground/Checkpoints/recap_value/
+  split.json
+  metrics.jsonl                 # 训练 CE、梯度范数、验证 CE 和价值 MAE
+  step_0001000/...              # 周期保存
+  final/
+    critic.pt                  # QwenValueModel.state_dict，含主干、价值头、bins
+    optimizer.pt               # 优化器状态和 step，单独保存
+    metadata.json              # 奖励尺度、输入约定和训练划分
+    config.yaml                # 完整共享配置，checkpoint 指向此 critic.pt
+```
+
+输出目录已存在时拒绝覆盖，请给新训练指定新目录。
+`--checkpoint` 是从已有 critic 权重继续学习的 warm start，会创建新优化器和新步数；
+当前入口不提供精确断点续训。optimizer.pt 留存供后续恢复工具使用。
+
+### 3. 导出优势和策略标签
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m examples.LIBERO.label_recap_advantages \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
+```
+
+未指定 checkpoint 时自动读取 `recap.training.output_dir/final/critic.pt`；
+也可用 `--checkpoint /path/to/critic.pt` 选择中间 checkpoint。
+必须同时保留同目录下的 metadata.json，标注前会检查训练步数和奖励／输入约定。
+单独下载的 Instruct 权重不能作为已训练的 critic 标注数据。
+
+脚本按 prediction_batch_size 分批解码图像和计算价值，整条轨迹只缓存数值数组。
+默认使用 posttrain 50 步优势；阈值在全部标注轨迹的有效帧上按任务统一标定，
+不是每个 batch 单独标定。离线标签不做条件 dropout；策略训练阶段再做 dropout。
+
+每个数据集写入 `datasets.vla_data.advantage_labels.path`，
+默认 `meta/advantage_labels.jsonl`，可直接被现有策略加载器读取。
+`recap.labeling.output_dir` 默认 `playground/Checkpoints/recap_labels`，保存：
+
+- `scores.jsonl`：dataset_name、episode_index、frame_index、task_key、value、return、advantage、标签及接管标记。
+- `metadata.json`：checkpoint、优化器步数、任务 ID 映射、阈值、实际正样本比例和标签路径。
+- `config.yaml`：保留 framework 的完整共享配置，并记录 critic 路径和标定阈值。
+
+已有标签默认拒绝覆盖。新一轮标注需要新的 labeling.output_dir；
+只有明确传入 `--overwrite_labels` 才会替换旧标签。每个文件先写临时文件再替换。
+标签更新后需要重新启动策略 DataLoader，清除 worker 中旧标签缓存。
+标注结束即可用同一共享 YAML 启动原策略训练入口。
+
+所有配置都可通过 `--set KEY=VALUE ...` 临时覆盖；奖励覆盖必须在训练和标注两步保持一致。
+推荐把最终取值写回共享 YAML，减少手工不一致。
+
+### 验证范围
+
+`test_recap_pipeline.py` 使用小型真实 Qwen3-VL 训练并更新参数，重新加载保存权重，
+计算优势、标定阈值、导出标签，再通过 AdvantageLabelSource 读取，验证数值与索引。
+还覆盖缺失／重复结果、截断轨迹、帧不连续、未来观测、奖励尺度不匹配和只检查数据的入口。
+测试的轨迹表与视频读取使用临时夹具，不代表真实 LeRobot Parquet／视频已经验证，
+也不代表 2B critic 已完成任务训练。
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover \
+  -s vla/model/modules/recap/tests -v
+```

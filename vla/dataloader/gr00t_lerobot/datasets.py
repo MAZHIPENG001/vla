@@ -41,6 +41,7 @@ from PIL import Image
 import torch.distributed as dist
 
 from vla.dataloader.gr00t_lerobot.video import get_all_frames, get_frames_by_timestamps
+from vla.dataloader.advantage_labels import AdvantageLabelError, AdvantageLabelSource
 
 from vla.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 from vla.dataloader.gr00t_lerobot.schema import (
@@ -613,6 +614,9 @@ class LeRobotSingleDataset(Dataset):
 
         self._dataset_path = Path(dataset_path)
         self._dataset_name = self._dataset_path.name
+        self._advantage_labels = AdvantageLabelSource(
+            self._dataset_path, data_cfg.get("advantage_labels") if data_cfg is not None else None,
+        )
         if isinstance(embodiment_tag, EmbodimentTag):
             self.tag = embodiment_tag.value
         else:
@@ -1374,7 +1378,14 @@ class LeRobotSingleDataset(Dataset):
         trajectory_id, base_index = self.all_steps[index]
         raw_data = self.get_step_data(trajectory_id, base_index)
         data = self.transforms(raw_data)
-        return self._pack_sample(data)
+        return self._attach_advantage_label(self._pack_sample(data), trajectory_id, base_index)
+
+    def _attach_advantage_label(self, sample, trajectory_id, base_index):
+        """Attach labels after transforms using the original observation anchor."""
+        source = getattr(self, "_advantage_labels", None)
+        if source is not None and source.source != "none":
+            sample.update(source.get(trajectory_id, base_index, self.curr_traj_data))
+        return sample
 
     def _pack_sample(self, data: dict) -> dict:
         """Pack transformed modality data into training sample format."""
@@ -2384,9 +2395,14 @@ class LeRobotMixtureDataset(Dataset):
                 raw_data = dataset.get_step_data(trajectory_id, step)    
                 data = dataset.transforms(raw_data)
                 sample = dataset._pack_sample(data)
+                sample = dataset._attach_advantage_label(sample, trajectory_id, step)
                 
                 return sample
                 
+            except AdvantageLabelError:
+                # A missing/corrupt label must not silently bias the training set
+                # by retrying a different random observation.
+                raise
             except Exception as e:
                 last_exception = e
                 if attempt < max_retries - 1:

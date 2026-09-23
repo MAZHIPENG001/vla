@@ -171,15 +171,8 @@ class Qwenvl_OFT(baseframework):
             self.add_discretized_state_to_instruction(instructions, state) if state is not None else instructions
         )
 
-        # step 0: add special action token to instruction
-        action_tokens = (
-            self.action_token * self.chunk_len
-        )  # can't add " " between two tokens, otherwise will be tokenized to multiple tokens
-        prompt_suffix = f" Please predict the next {self.chunk_len} robot actions: <action>{action_tokens}<action>."
-        instructions = [instruction + prompt_suffix for instruction in instructions]
-
         # Step 1: QWenVL input format
-        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
+        qwen_inputs = self._build_action_inputs(batch_images, instructions, examples, inference=False, **kwargs)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
@@ -197,6 +190,7 @@ class Qwenvl_OFT(baseframework):
             action_queries = self._gather_action_token_embeddings(
                 last_hidden, input_ids, action_token_id=self.action_token_id
             )  # [B, chunk_len, H]
+            action_queries = action_queries.to(dtype=next(self.action_model.parameters()).dtype)
             pred_actions = self.action_model.predict_action(action_queries)  # (B, chunk_len, action_dim)
 
             # Label alignment: take the last chunk_len segment
@@ -244,15 +238,8 @@ class Qwenvl_OFT(baseframework):
         if train_obs_image_size:
             batch_images = resize_images(batch_images, target_size=train_obs_image_size)
 
-        # step 0: add special action token to instruction
-        action_tokens = (
-            self.action_token * self.chunk_len
-        )  # can't add " " between two tokens, otherwise will be tokenized to multiple tokens
-        prompt_suffix = f" Please predict the next {self.chunk_len} robot actions: <action>{action_tokens}<action>."
-        instructions = [instruction + prompt_suffix for instruction in instructions]
-
         # Step 1: QWenVL input format
-        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
+        qwen_inputs = self._build_action_inputs(batch_images, instructions, examples, inference=True, **kwargs)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
@@ -270,10 +257,19 @@ class Qwenvl_OFT(baseframework):
             action_queries = self._gather_action_token_embeddings(
                 last_hidden, input_ids, action_token_id=self.action_token_id
             )  # [B, chunk_len, H]
+            action_queries = action_queries.to(dtype=next(self.action_model.parameters()).dtype)
             pred_actions = self.action_model.predict_action(action_queries)  # (B, chunk_len, action_dim)
 
         normalized_actions = pred_actions.detach().cpu().numpy()
         return {"normalized_actions": normalized_actions}
+
+    def _build_action_inputs(self, images, instructions, examples, *, inference, **kwargs):
+        """Prompt hook for OFT variants; preserve the original OFT prompt format."""
+        action_tokens = self.action_token * self.chunk_len
+        suffix = f" Please predict the next {self.chunk_len} robot actions: <action>{action_tokens}<action>."
+        return self.qwen_vl_interface.build_qwenvl_inputs(
+            images=images, instructions=[instruction + suffix for instruction in instructions],
+        )
 
     def _gather_action_token_embeddings(
         self,

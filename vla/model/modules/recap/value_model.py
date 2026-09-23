@@ -16,7 +16,8 @@ class ValueModelOutput:
 
 
 class QwenValueModel(nn.Module):
-    """Images + task instruction -> a categorical distribution over value bins.
+    """
+    Images + task instruction -> a categorical distribution over value bins.
 
     Reuses _QWen_VL_Interface for loading, chat formatting and visual inputs.
     The final nonpadding token summarizes the causal multimodal context. A new
