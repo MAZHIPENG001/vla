@@ -13,7 +13,6 @@ import torch
 
 from vla.model.modules.recap.recap import QwenRecapDefaultConfig
 
-DEFAULT_CONFIG = Path(__file__).parent / "train_files/starvla_oft_recap_libero.yaml"
 PIPELINE_DEFAULTS = {
     "data": {
         "success_source": "manifest", "outcome_path": "meta/recap_episodes.jsonl",
@@ -35,7 +34,7 @@ PIPELINE_DEFAULTS = {
 
 def parser_for(description):
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--config_yaml", default=str(DEFAULT_CONFIG))
+    parser.add_argument("--config_yaml", required=True, help="Shared task YAML for the selected environment.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--model_id", help="Override only the critic backbone.")
     parser.add_argument("--checkpoint", help="Trained QwenValueModel state_dict; training uses this as a warm start.")

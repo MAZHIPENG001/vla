@@ -1,11 +1,11 @@
-"""Train a RECAP critic: python -m examples.LIBERO.train_recap_value."""
+"""Train a RECAP critic: python -m vla.training.train_recap_value."""
 import json
 from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
 
-from examples.LIBERO.recap_utils import (
+from vla.training.recap_utils import (
     describe_store, load_config, parser_for, save_checkpoint, seed_everything,
     single_process_only, validate_checkpoint, write_json,
 )

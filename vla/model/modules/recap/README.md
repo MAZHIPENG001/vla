@@ -4,14 +4,14 @@
 本模块包含基于 `Qwen/Qwen3-VL-2B-Instruct` 的价值模型，以及优势和 VLA 条件文本的计算。
 价值模型复用 `vla/model/modules/vlm/Qwen.py` 的加载、图像预处理和对话模板接口。
 PDF 第 V-C 节描述的原始价值模型骨干为 **670M**；这里按需求改用 Qwen3-VL 2B。
-提供可反向传播的价值训练损失，以及 examples/LIBERO 下的独立价值训练和离线标注入口；两者共用外部任务 YAML。
+提供可反向传播的价值训练损失，以及 vla/training 下的通用价值训练和离线标注入口；两者共用外部任务 YAML。
 
 ## 与 QwenOFT 一致的配置和批输入接口
 
 `recap.py` 的 `QwenRecapDefaultConfig` + `QwenRecap` 参照 `QwenOFT.py` 组织：
 使用独立的顶层 `recap` 节点合并默认值与 YAML，通过 `get_vlm_model` 实际加载 Qwen，
 读取真实隐藏维度，并以 `examples: list[dict]` 作为训练和预测接口。
-配置统一放在仓库外层的 `examples/LIBERO/train_files/starvla_cotrain_libero.yaml`，
+各环境的配置放在 `examples/<环境>/train_files/`，例如 `examples/LIBERO/train_files/starvla_cotrain_libero.yaml`，
 RECAP 模块内不再保存独立 YAML。接口支持任务 YAML 路径、普通 dict 或 OmegaConf。
 `framework` 保留给 VLA 策略；`recap` 配置独立的价值模型和优势计算。
 该任务 YAML 同时包含 `framework`、`recap`、`datasets` 和 `trainer`，由策略和价值模型共同读取。
@@ -449,12 +449,21 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s vla/model/mo
 
 ## 完整价值训练与离线标注入口
 
-新增入口位于 examples，两个阶段与策略训练共用
-`examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`：
+通用入口位于 `vla/training`，通过必填的 `--config_yaml` 选择环境，
+价值训练、离线标注和策略训练共用传入的任务 YAML。
+`examples/<环境>/train_files/` 保存环境配置；下文以
+`examples/LIBERO/train_files/starvla_oft_recap_libero.yaml` 为例。
+旧的 `python -m examples.LIBERO...` 入口已迁移，使用下面的新模块路径：
 
-- `python -m examples.LIBERO.train_recap_value`：完整轨迹 → 剩余回报 → 价值训练／验证 → checkpoint。
-- `python -m examples.LIBERO.label_recap_advantages`：训练好的 checkpoint → 连续优势 → 任务阈值 → 数据集标签。
-- 公共数据适配在 `vla/dataloader/recap_dataset.py`，CLI 和 checkpoint 工具在 `examples/LIBERO/recap_utils.py`。
+- `python -m vla.training.train_recap_value`：完整轨迹 → 剩余回报 → 价值训练／验证 → checkpoint。
+- `python -m vla.training.label_recap_advantages`：训练好的 checkpoint → 连续优势 → 任务阈值 → 数据集标签。
+- 公共数据适配在 `vla/dataloader/recap_dataset.py`，CLI 和 checkpoint 工具在 `vla/training/recap_utils.py`。
+
+当前数据适配器支持仓库已注册的 LeRobot 数据集，通过
+`datasets.vla_data.data_root_dir` 和 `data_mix` 选择数据，通过 `recap.data`
+指定任务、结果和接管字段。其他环境使用同一套训练／标注代码和各自的配置。
+其他数据格式仍需实现完整轨迹读取适配，不能仅靠更换 YAML 自动支持；
+这里提供的是离线轨迹训练流程，不包含各仿真环境的在线交互与采集逻辑。
 
 两个入口仅支持单进程 CPU／单 GPU；请直接用 `python -m`，不要用 torchrun。
 策略网络不参与价值训练，也不会占用这一步的显存。完整 2B 主干训练仍需足够显存；
@@ -511,10 +520,10 @@ recap:
 从仓库根目录执行。以下命令假设已经在共享 YAML 填好奖励配置和路径：
 
 ```bash
-NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m examples.LIBERO.train_recap_value \
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.train_recap_value \
   --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --check_data
 
-NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m examples.LIBERO.train_recap_value \
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.train_recap_value \
   --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
 ```
 
@@ -550,7 +559,7 @@ playground/Checkpoints/recap_value/
 ### 3. 导出优势和策略标签
 
 ```bash
-NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m examples.LIBERO.label_recap_advantages \
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.label_recap_advantages \
   --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
 ```
 

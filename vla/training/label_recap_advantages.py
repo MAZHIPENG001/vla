@@ -1,11 +1,11 @@
-"""Label complete trajectories: python -m examples.LIBERO.label_recap_advantages."""
+"""Label complete trajectories: python -m vla.training.label_recap_advantages."""
 import json
 from pathlib import Path
 
 from omegaconf import OmegaConf
 import torch
 
-from examples.LIBERO.recap_utils import (
+from vla.training.recap_utils import (
     atomic_write, describe_store, load_config, parser_for, seed_everything,
     single_process_only, validate_checkpoint, write_json,
 )

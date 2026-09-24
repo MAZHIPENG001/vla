@@ -10,8 +10,8 @@ from omegaconf import OmegaConf
 import pandas as pd
 import torch
 
-from examples.LIBERO import train_recap_value, label_recap_advantages
-from examples.LIBERO.recap_utils import load_config, parser_for, validate_checkpoint
+from vla.training import train_recap_value, label_recap_advantages
+from vla.training.recap_utils import load_config, parser_for, validate_checkpoint
 from vla.dataloader.advantage_labels import AdvantageLabelSource
 from vla.dataloader.recap_dataset import RecapEpisodes, ReturnDataset, build_episode_store
 from vla.model.modules.recap.tests.test_advantage_data import FixtureDataset
