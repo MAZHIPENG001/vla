@@ -1,7 +1,14 @@
-"""LeRobot v2 数据访问：Parquet 读取、字段适配、Task 统计和 Episode 数值视图。
+"""
+LeRobot v2 数据访问：
+    Parquet 读取
+    字段适配
+    Task 统计
+    Episode 数值视图
 
-公共入口：LeRobotReader（原始数据）与 BrowserModel（浏览和分析）。
-该模块不依赖桌面界面，不修改原始数据集。
+公共入口
+    LeRobotReader(原始数据)与 BrowserModel(浏览和分析)
+    
+    !该模块不依赖桌面界面，不修改原始数据集。
 """
 
 from bisect import bisect_right

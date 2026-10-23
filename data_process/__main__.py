@@ -34,6 +34,7 @@ def _read(args) -> None:
     print(f"\33[92m数据集: {loader.path}\33[0m")
     print(f"\33[92m轨迹数: {loader.num_episodes}, 总帧数: {len(loader)}, FPS: {loader.fps}\33[0m")
     print(f"\33[92m相机: {loader.camera_keys}\33[0m")
+    
     frame = loader.read_frame(args.episode, args.frame, args.columns)
     print(f"\33[93m轨迹 {args.episode}, 帧 {args.frame}:\33[0m")
     for key, value in frame.items():
