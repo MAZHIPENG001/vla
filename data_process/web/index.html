@@ -65,10 +65,13 @@
   <div class="overview" id="overview">
   </div>
   <div class="banner" hidden="" id="previewBanner">
-   正在预览本轮保留候选
+   <span id="previewLabel">正在预览区间</span>
    <button id="resetPreview">
     恢复全部数据
    </button>
+  </div>
+  <div class="banner" hidden id="qualityLiveBanner" role="status">
+   <span id="qualityLiveText"></span><button id="qualityLiveOpen" type="button">查看检测结果</button>
   </div>
   <main>
    <aside>
@@ -190,6 +193,8 @@
      </div>
      <div class="dimensions" id="dimensions">
      </div>
+     <div class="anomaly-legend" id="anomalyLegend"></div>
+     <label class="muted"><input id="showWaiting" type="checkbox" checked/>显示正常等待（浅色静止标记）</label>
      <div class="chart-wrap">
       <canvas aria-label="State 和 Action 轨迹曲线" id="chart">
       </canvas>
@@ -198,6 +203,11 @@
      </div>
      <div class="muted">
       实线 State · 虚线 Action · 单击跳帧 · 滚轮缩放 · 按住 Shift 拖动平移
+     </div>
+     <div id="anomalyReview" hidden>
+      <p id="anomalySummary" class="muted"></p><p id="currentFrameFlags" class="muted"></p>
+      <div class="anomaly-intervals" id="anomalyIntervals"></div>
+      <details id="selectedSegmentDetails" hidden><summary id="selectedSegmentTitle">区间指标</summary><pre id="selectedSegmentData"></pre></details>
      </div>
     </section>
     <section class="panel">
@@ -325,142 +335,57 @@
   </dialog>
   <dialog id="qualityDialog">
    <div class="section-title">
-    <div>
-     <h2>
-      Robotic Data · 质量筛选
-     </h2>
-     <p class="muted">
-      调整阈值 → 运行检查 → 复核异常 → 预览保留候选
-     </p>
-    </div>
-    <button data-close="qualityDialog">
-     关闭
-    </button>
+    <div><h2>Robotic Data · 帧 / 区间异常检测</h2><p class="muted">检测标记 → 人工复核 → 选择区间预览；原始数据保持只读</p></div>
+    <button data-close="qualityDialog">关闭</button>
    </div>
    <form id="qualityForm">
-    <details open="">
-     <summary>
-      State / Action 阈值
-     </summary>
-     <div class="signal-settings" id="signalSettings">
-     </div>
+    <details open><summary>State / Action 阈值</summary><div class="signal-settings" id="signalSettings"></div>
+     <p class="muted">长静止：连续帧数或真实持续时间达到任一已配置阈值时标记，短等待单独记录。留空表示不使用该阈值。Z-score 按单条轨迹逐维计算，Jerk 支持逐原始维度阈值。</p>
     </details>
-    <details>
-     <summary>
-      图像 / 时间同步设置
-     </summary>
-     <div class="settings" id="imageSettings">
-     </div>
-     <label class="wide">
-      相机独立采集时间戳映射 JSON
-      <input id="cameraClocks" placeholder='{"image":"image_timestamp"}' value="{}"/>
-     </label>
-     <p class="muted">
-      时间戳需要处于同一时钟域。缺少真实采集时间戳时，同步检查列为未验证。清晰度、Jerk 阈值需自行校准。
-     </p>
+    <details><summary>图像 / 时间同步设置</summary><div class="settings" id="imageSettings"></div>
+     <label class="wide">相机独立采集时间戳映射 JSON <input id="cameraClocks" placeholder='{"image":"image_timestamp"}' value="{}"/></label>
+     <p class="muted">缺少真实采集时间戳时同步检查未验证；缺少运动时间戳时不以 FPS 代替差分。图像抽样只覆盖被采样的帧。</p>
     </details>
     <div class="quality-controls">
-     <select aria-label="质量检查范围" id="qualityScope">
-      <option value="episode">
-       当前 Episode
-      </option>
-      <option value="task">
-       当前 Task（原始范围）
-      </option>
-      <option value="all">
-       全部数据集
-      </option>
-     </select>
-     <button class="primary" id="runQuality">
-      运行 / 重新检查
-     </button>
-     <button disabled="" id="stopQuality" type="button">
-      停止
-     </button>
-     <button disabled="" id="downloadReport" type="button">
-      保存质量报告 JSON
-     </button>
+     <select aria-label="检测范围" id="qualityScope"><option value="episode">当前 Episode</option><option value="task">当前 Task（原始范围）</option><option value="all">全部数据集</option></select>
+     <button class="primary" id="runQuality">运行 / 重新检测</button>
+     <button disabled id="stopQuality" type="button">停止</button>
+     <button disabled id="downloadReport" type="button">保存报告目录</button>
     </div>
+    <label class="wide">报告保存根目录（服务所在机器，数据集之外）<input id="reportRoot" type="text" spellcheck="false" required/></label>
    </form>
-   <progress id="qualityProgress" max="1" value="0">
-   </progress>
-   <p id="qualityStatus" role="status">
-    尚未运行。未校准或无法验证的检查会列入待复核。
-   </p>
-   <div class="quality-controls">
-    <label>
-     <input checked="" id="includeReview" type="checkbox"/>
-     包含待复核轨迹
-    </label>
-    <button disabled="" id="applyPreview">
-     预览本轮保留结果
-    </button>
-    <button id="restoreAll">
-     恢复全部数据
-    </button>
-   </div>
-   <p class="muted">
-    按整条 Episode 筛选。预览仅包含本轮范围的候选；报告可下载，原数据保持只读。关闭此面板后检查仍会继续。
-   </p>
-   <details open="">
-    <summary>
-     分阶段筛选统计
-    </summary>
-    <div class="table-wrap">
-     <table>
-      <thead>
-       <tr>
-        <th>
-         阶段
-        </th>
-        <th>
-         进入
-        </th>
-        <th>
-         剔除候选
-        </th>
-        <th>
-         剩余轨迹
-        </th>
-        <th>
-         剩余帧数
-        </th>
-       </tr>
-      </thead>
-      <tbody id="funnel">
-      </tbody>
-     </table>
-    </div>
+   <label class="wide">本轮报告目录（每条 Episode 完成后自动保存）<input id="reportSavedPath" type="text" readonly/></label>
+   <details><summary>导入先前检测信息</summary>
+    <div class="quality-controls"><select id="reportHistory" aria-label="本数据集的历史检测"><option value="">选择历史检测…</option></select><button id="refreshHistory" type="button">刷新历史</button></div>
+    <label class="wide">报告目录 / manifest.json / 旧版帧级 JSON 路径<input id="reportImportPath" type="text" placeholder="服务所在机器上的完整路径" spellcheck="false"/></label>
+    <button id="importReport" type="button">导入检测结果</button>
+    <p class="muted">导入时校验数据集、元数据与原始帧映射。旧版帧级 JSON 自动转换为分目录报告并保留原文件；刷新页面可恢复最近一次检测。</p>
    </details>
-   <div class="table-wrap">
-    <table>
-     <thead>
-      <tr>
-       <th>
-        Episode
-       </th>
-       <th>
-        任务
-       </th>
-       <th>
-        帧数
-       </th>
-       <th>
-        结果
-       </th>
-       <th>
-        筛除 / 待复核原因
-       </th>
-       <th>
-        查看
-       </th>
-      </tr>
-     </thead>
-     <tbody id="qualityRows">
-     </tbody>
-    </table>
+   <progress id="qualityProgress" max="1" value="0"></progress>
+   <p id="qualityStatus" role="status">尚未运行。检测只标记具体帧和区间，不拒绝整条 Episode。</p>
+   <div class="quality-controls">
+    <button disabled id="previewNormal">预览正常区间（未标记帧）</button>
+    <button disabled id="previewSuspect">预览疑似异常区间</button>
+    <button id="restoreAll">恢复全部原始帧</button>
+    <button disabled id="downloadSelection">保存区间选择 JSON</button>
    </div>
-   <pre id="qualityDetail">选择结果行查看完整指标与异常帧索引。</pre>
+   <p class="muted">检测期间持续更新曲线和统计；当前正在检查的 Episode 结果为暂存标记。预览仅覆盖完整检测范围，不拼接、不重编号、不删除数据。“正常”表示本轮已检查项未标记异常，未验证项仍需复核。停止后已完成的 Episode 保存在报告目录；本页不导出新的数据集。</p>
+   <details open><summary>帧级 / 区间级统计（不同类型可在同一帧重叠，不累计为剔除数）</summary>
+    <div class="table-wrap"><table><thead><tr><th>异常类型</th><th>区间数</th><th>涉及帧数</th><th>涉及 Episode</th></tr></thead><tbody id="typeStatistics"></tbody></table></div>
+   </details>
+   <details open><summary>Episode 汇总（组织和读取单位，局部异常不拒绝整条轨迹）</summary>
+    <div class="table-wrap"><table><thead><tr><th>Episode</th><th>任务</th><th>原始帧数</th><th>未标记帧</th><th>疑似异常帧</th><th>不可检查帧</th><th>异常区间</th><th>汇总</th></tr></thead><tbody id="qualityRows"></tbody></table></div>
+   </details>
+   <details open><summary>区间明细 · 点击结果跳转到原始 Episode 和起始帧，完整指标同步显示在曲线下方</summary>
+    <div class="quality-controls">
+     <select id="segmentEpisode" aria-label="区间 Episode 筛选"><option value="all">全部 Episode</option></select>
+     <select id="segmentType" aria-label="异常类型筛选"><option value="all">全部类型</option><option value="static">静止</option><option value="velocity">速度</option><option value="acceleration">加速度</option><option value="jerk">Jerk</option><option value="integrity">完整性</option><option value="image">图像</option><option value="sync">同步</option></select>
+     <label><input id="includeWaiting" type="checkbox"/>包含正常等待</label>
+     <button id="segmentPrevious" type="button">上一页</button><span id="segmentPage" class="muted"></span><button id="segmentNext" type="button">下一页</button>
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>Episode</th><th>类型 / 信号</th><th>原始行索引（0 起始）</th><th>原始时间(s)</th><th>持续时间(s)</th><th>维度</th><th>状态</th></tr></thead><tbody id="segmentRows"></tbody></table></div>
+   </details>
+   <details><summary>所选 Episode / 区间的完整报告</summary><pre id="qualityDetail">选择结果查看完整指标、阈值、差分窗口和原始索引。</pre></details>
   </dialog>
  </body>
 </html>

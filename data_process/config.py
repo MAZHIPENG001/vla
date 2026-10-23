@@ -21,18 +21,21 @@ class SignalPolicy:
     kind: str = "position"  # position / velocity / acceleration / command
     dimensions: tuple[int, ...] | None = None
     static_epsilon: float | tuple[float, ...] = 1e-6
-    max_static_ratio: float = 0.95
+    static_min_frames: int | None = 20
+    static_min_seconds: float | None = 1.0
     velocity_zscore: float | None = 6.0
     acceleration_zscore: float | None = 6.0
     jerk_limit: float | tuple[float, ...] | None = None
-    max_bad_ratio: float = 0.01
 
     def __post_init__(self):
         if self.kind not in {"position", "velocity", "acceleration", "command"}:
             raise ValueError("信号类型必须为 position / velocity / acceleration / command")
-        for name in ("max_static_ratio", "max_bad_ratio"):
-            if not math.isfinite(getattr(self, name)) or not 0 <= getattr(self, name) <= 1:
-                raise ValueError(f"{name} 必须在 [0, 1] 内")
+        if self.static_min_frames is not None and (type(self.static_min_frames) is not int or self.static_min_frames < 2):
+            raise ValueError("连续静止帧阈值必须为至少 2 的整数，或留空")
+        if self.static_min_seconds is not None and (
+            not math.isfinite(self.static_min_seconds) or self.static_min_seconds <= 0
+        ):
+            raise ValueError("连续静止时间阈值必须为正的有限秒数，或留空")
         for name in ("static_epsilon", "jerk_limit", "velocity_zscore", "acceleration_zscore"):
             value = getattr(self, name)
             if value is not None:

@@ -1,5 +1,5 @@
 // 当前浏览范围的 Task 表格、长度分布及 CSV 下载。
-import {$, state, tasks, visibleIds, format, cell, run, download, canvasContext} from './common.js';
+import {$, state, tasks, visibleIds, frameCount, format, cell, run, download, canvasContext} from './common.js';
 
 let sort = 'name';
 let direction = 1;
@@ -16,7 +16,7 @@ export function renderStats() {
         $('statsRows').append(row);
     }
     const {ctx, w, h} = canvasContext($('histogram'));
-    const lengths = visibleIds().map(id => state.info.episodes[id].length);
+    const lengths = visibleIds().map(frameCount);
     if (!lengths.length) return;
     const max = lengths.reduce((value, length) => Math.max(value, length), 0);
     const bins = Array(20).fill(0);

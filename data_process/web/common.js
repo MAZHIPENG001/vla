@@ -14,7 +14,55 @@ export const state = {
     timer: null,
     dims: new Set(),
     zoom: null,
+    frameRanges: null,
+    previewMode: null,
+    qualityReport: null,
+    qualityDetails: new Map(),
+    qualityStale: false,
+    selectedSegment: null,
+    anomalyTypes: new Set(['static', 'velocity', 'acceleration', 'jerk', 'integrity', 'image', 'sync']),
+    showWaiting: true,
 };
+
+export const anomalyStyles = {
+    static: {label: '静止', color: '#ba850c'},
+    velocity: {label: '速度', color: '#d74b55'},
+    acceleration: {label: '加速度', color: '#8054bd'},
+    jerk: {label: 'Jerk', color: '#df711f'},
+    integrity: {label: '完整性', color: '#ad4054'},
+    image: {label: '图像', color: '#1b9994'},
+    sync: {label: '同步', color: '#3a78be'},
+};
+
+export function findings(id) {
+    return state.qualityDetails.get(id)?.row || state.qualityReport?.episodes.find(row => row.episode_index === id);
+}
+
+export function frameRanges(id) {
+    return state.frameRanges === null ? [[0, state.info.episodes[id].length - 1]] : (state.frameRanges[id] || []);
+}
+
+export function frameCount(id) {
+    return frameRanges(id).reduce((sum, [start, end]) => sum + end - start + 1, 0);
+}
+
+export function visibleFrame(id, frame) {
+    return frameRanges(id).some(([start, end]) => start <= frame && frame <= end);
+}
+
+// 使用原始行索引预览区间，绝不将两段数据重新编号或拼接成连续信号。
+export function nextFrame(id, requested, direction = 1) {
+    const ranges = frameRanges(id);
+    if (direction >= 0) {
+        for (const [start, end] of ranges) if (requested <= end) return Math.max(start, requested);
+    } else {
+        for (let i = ranges.length - 1; i >= 0; i--) {
+            const [start, end] = ranges[i];
+            if (requested >= start) return Math.min(end, requested);
+        }
+    }
+    return null;
+}
 
 export const palette = [
     '#147d78', '#4878c4', '#d29238', '#af5f91', '#5b9c62', '#cb6152', '#6d65ba',
@@ -87,7 +135,7 @@ export function visibleIds() {
 export function tasks() {
     return state.info.tasks.map(task => {
         const ids = task.episode_ids.filter(id => state.filter === null || state.filter.has(id));
-        const frames = ids.reduce((sum, id) => sum + state.info.episodes[id].length, 0);
+        const frames = ids.reduce((sum, id) => sum + frameCount(id), 0);
         return {
             ...task,
             episode_ids: ids,

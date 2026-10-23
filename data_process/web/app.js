@@ -1,13 +1,14 @@
 // 页面入口：任务导航、帧加载、同步播放及各功能模块的连接。
-import {$, state, api, pretty, format, error, run, cell, button, tasks, taskIds, visibleIds} from './common.js';
+import {$, state, api, pretty, format, error, run, cell, button, tasks, taskIds, visibleIds,
+    frameCount, visibleFrame, nextFrame, findings} from './common.js';
 import {bindChart, drawChart, renderDimensions} from './chart.js';
 import {bindStatistics, renderStats} from './statistics.js';
-import {bindQuality} from './quality.js';
+import {bindQuality, restoreQuality, renderAnnotations, selectSegment} from './quality.js';
 import {bindDataset} from './dataset.js';
 
 function renderNavigation() {
     const list = tasks(), ids = visibleIds();
-    const frames = ids.reduce((sum, id) => sum + state.info.episodes[id].length, 0);
+    const frames = ids.reduce((sum, id) => sum + frameCount(id), 0);
     $('overview').replaceChildren();
     for (const [title, value] of [
         ['Task 任务', list.length], ['Episode 轨迹', ids.length],
@@ -36,6 +37,9 @@ function renderNavigation() {
     }
     renderEpisodes();
     $('previewBanner').hidden = state.filter === null;
+    $('previewLabel').textContent = state.previewMode === 'suspect'
+        ? '正在预览疑似异常区间，帧号和时间戳保持原始编号'
+        : '正在预览未标记异常的区间（仅针对已执行的检查），原始数据未改变';
 }
 
 function renderEpisodes() {
@@ -47,8 +51,15 @@ function renderEpisodes() {
         const element = button(`Episode ${id}`, () => loadEpisode(id));
         element.dataset.episode = id;
         const sub = document.createElement('small');
-        sub.textContent = `${meta.length} 帧 · ${(meta.length / state.info.fps).toFixed(2)} s`;
+        sub.textContent = state.frameRanges === null
+            ? `${meta.length} 帧 · ${(meta.length / state.info.fps).toFixed(2)} s`
+            : `预览 ${frameCount(id)} / ${meta.length} 帧`;
         element.append(sub);
+        const badge = document.createElement('small');
+        badge.className = 'episode-quality';
+        const result = findings(id);
+        badge.textContent = result ? `疑似异常 ${result.suspect_frames} 帧${result.episode_complete === false ? ' · 检测中' : ''}` : '';
+        element.append(badge);
         element.classList.toggle('selected', state.episode?.index === id);
         $('episodes').append(element);
     }
@@ -93,6 +104,7 @@ function clearEpisode() {
     $('frameTotal').textContent = '/ 0';
     $('play').disabled = true;
     drawChart();
+    renderAnnotations();
 }
 
 async function loadEpisode(id, frame = 0) {
@@ -116,13 +128,14 @@ async function loadEpisode(id, frame = 0) {
         length: Math.max(state.info.schema.state.names.length, state.info.schema.action.names.length),
     }, (_, i) => i));
     $('episodeTitle').textContent = `Episode ${id}`;
-    $('episodeInfo').textContent = `${episode.length} 帧 · ${(episode.length / state.info.fps).toFixed(2)} s · ${
+    $('episodeInfo').textContent = `${episode.length} 原始帧${state.frameRanges === null ? '' : ` · 预览 ${frameCount(id)} 帧`} · ${(episode.length / state.info.fps).toFixed(2)} s · ${
         state.info.fps} FPS · State: ${state.info.schema.state.key || '未映射'} / Action: ${state.info.schema.action.key || '未映射'}`;
     $('metadata').textContent = pretty({
         ...episode.metadata,
         timestamp_start: episode.times[0],
         timestamp_end: episode.times.at(-1),
-        timestamp_span: episode.times.at(-1) - episode.times[0],
+        timestamp_span: episode.times.at(-1) != null && episode.times[0] != null
+            ? episode.times.at(-1) - episode.times[0] : null,
         state: state.info.schema.state,
         action: state.info.schema.action,
     });
@@ -134,6 +147,7 @@ async function loadEpisode(id, frame = 0) {
     $('play').disabled = false;
     renderDimensions();
     renderEpisodes();
+    renderAnnotations();
     await showFrame(Math.min(frame, episode.length - 1));
 }
 
@@ -141,6 +155,11 @@ async function showFrame(frame) {
     const episode = state.episode;
     if (!episode) return;
     frame = Math.max(0, Math.min(episode.length - 1, Math.round(frame)));
+    if (!visibleFrame(episode.index, frame)) {
+        const direction = frame >= state.frame ? 1 : -1;
+        frame = nextFrame(episode.index, frame, direction) ?? nextFrame(episode.index, frame, -direction);
+        if (frame === null) return;
+    }
     const request = ++state.request, generation = state.generation;
     state.controller?.abort();
     const controller = new AbortController();
@@ -162,6 +181,8 @@ async function showFrame(frame) {
     // 多相机、数值和曲线在同一次提交中更新；过期响应不能覆盖新选择。
     if (request !== state.request || generation !== state.generation) return;
     state.frame = frame;
+    $('episodeInfo').textContent = `${episode.length} 原始帧${state.frameRanges === null ? '' : ` · 预览 ${frameCount(episode.index)} 帧`} · ${(episode.length / state.info.fps).toFixed(2)} s · ${
+        state.info.fps} FPS · State: ${state.info.schema.state.key || '未映射'} / Action: ${state.info.schema.action.key || '未映射'}`;
     $('frameSlider').value = frame;
     $('frameNumber').value = frame;
     $('cameras').replaceChildren(...decoded);
@@ -185,6 +206,7 @@ async function showFrame(frame) {
     $('rawValues').textContent = pretty(data.values);
     renderValues();
     drawChart();
+    renderAnnotations();
 }
 
 function renderValues() {
@@ -206,9 +228,9 @@ function renderValues() {
 async function tick() {
     if (!state.playing || !state.episode) return;
     const generation = state.generation, start = performance.now();
-    let next = state.frame + 1;
-    if (next >= state.episode.length) {
-        if ($('loop').checked) next = 0;
+    let next = nextFrame(state.episode.index, state.frame + 1);
+    if (next === null) {
+        if ($('loop').checked) next = nextFrame(state.episode.index, 0);
         else { stop(); return; }
     }
     try {
@@ -226,7 +248,7 @@ async function togglePlay() {
     if (!state.episode) return;
     if (state.playing) { stop(); return; }
     const generation = state.generation;
-    if (state.frame === state.episode.length - 1 && !$('loop').checked) {
+    if (nextFrame(state.episode.index, state.frame + 1) === null && !$('loop').checked) {
         await showFrame(0);
         if (generation !== state.generation) return;
     }
@@ -249,12 +271,24 @@ function openImage(episode, frame, camera) {
 }
 
 function setFilter(ids) {
+    stop();
+    if (ids === null) {
+        state.frameRanges = null;
+        state.previewMode = null;
+    }
     state.filter = ids === null ? null : new Set(ids);
     if (state.task !== null && !tasks().some(task => task.name === state.task)) state.task = null;
     renderNavigation();
     const available = taskIds();
     if (!available.length) clearEpisode();
     else if (!available.includes(state.episode?.index)) return loadEpisode(available[0]);
+    else if (state.episode) return showFrame(state.frame);
+}
+
+function setFrameFilter(ranges, mode) {
+    state.frameRanges = ranges;
+    state.previewMode = mode;
+    return setFilter(Object.keys(ranges).map(Number));
 }
 
 function bindNavigation() {
@@ -294,11 +328,17 @@ function bindNavigation() {
     }).observe($('chart'));
 }
 
-async function openOriginalEpisode(id, frame) {
+async function openOriginalEpisode(id, frame, endFrame = frame) {
     state.filter = null;
+    state.frameRanges = null;
+    state.previewMode = null;
     state.task = null;
     renderNavigation();
     await loadEpisode(id, frame);
+    if (endFrame > frame && state.episode?.index === id) {
+        state.zoom = [Math.max(0, frame - 5), Math.min(state.episode.length - 1, endFrame + 5)];
+        drawChart();
+    }
 }
 
 async function init() {
@@ -306,13 +346,14 @@ async function init() {
     $('datasetPath').textContent = state.info.path;
     bindDataset(stop);
     bindNavigation();
-    bindChart(seek);
+    bindChart(seek, selectSegment, renderAnnotations);
     bindStatistics(selectTask);
-    bindQuality({openEpisode: openOriginalEpisode, setFilter});
+    bindQuality({openEpisode: openOriginalEpisode, setFilter, setFrameFilter, drawChart, stopPlayback: stop});
     renderNavigation();
     const initial = state.info.initial_episode ?? visibleIds()[0];
     if (initial !== undefined) await loadEpisode(initial);
     else clearEpisode();
+    await restoreQuality();
     document.body.dataset.ready = 'true';
 }
 run(init)();

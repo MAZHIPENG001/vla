@@ -505,10 +505,6 @@ progress {
     color:#a57912;
 }
 
-.rejected {
-    color:#be4740;
-}
-
 .banner {
     margin:0 26px 16px;
     padding:10px 16px;
@@ -519,6 +515,15 @@ progress {
 
 .banner button {
     margin-left:16px;
+}
+
+.episode-quality {
+    color:#b86b12;
+}
+
+#reportHistory {
+    max-width:100%;
+    min-width:0;
 }
 
 #error {
@@ -688,4 +693,33 @@ progress {
 @media(max-width:700px) {
     .dataset-selector { padding:14px; }
     #datasetInput { flex-basis:100%; }
+}
+
+.anomaly-legend {
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px 14px;
+    margin:8px 0;
+}
+
+.anomaly-legend label {
+    display:flex;
+    align-items:center;
+}
+
+.anomaly-intervals {
+    display:flex;
+    gap:6px;
+    flex-wrap:wrap;
+    max-height:140px;
+    overflow:auto;
+}
+
+.anomaly-intervals button {
+    font-size:11px;
+    border-style:dashed;
+}
+
+#segmentRows tr {
+    cursor:pointer;
 }

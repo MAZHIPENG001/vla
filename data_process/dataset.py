@@ -15,7 +15,7 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from io import BytesIO
 import json
-from math import prod
+from math import isfinite, prod
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -368,7 +368,7 @@ class BrowserModel:
             for name, ids in sorted(by_name.items())
         ]
 
-    def read_episode(self, index: int) -> EpisodeData:
+    def read_episode(self, index: int, *, validate_timestamps: bool = True) -> EpisodeData:
         values = self.loader.read_episode(index, columns=self.numeric_keys)
         length = self.loader.episodes[index]["length"]
         if length <= 0:
@@ -377,10 +377,12 @@ class BrowserModel:
             values.get("timestamp", np.arange(length) / self.loader.fps),
             dtype=float,
         ).reshape(-1)
-        if len(times) != length or not np.all(np.isfinite(times)):
+        if validate_timestamps and (len(times) != length or not np.all(np.isfinite(times))):
             raise ValueError("时间戳数量不符或包含非有限值")
-        if np.any(np.diff(times) < 0):
+        if validate_timestamps and np.any(np.diff(times) < 0):
             raise ValueError("时间戳必须按时间递增")
+        if len(times) != length:
+            times = np.full(length, np.nan)
         # 在后台读取阶段验证维度，让错误与其他读取错误使用同一条界面提示通道。
         for field in (self.schema.state, self.schema.action):
             field.series(values, length)
@@ -395,9 +397,11 @@ class BrowserModel:
 def json_value(value):
     """将数值字段转为可检查的 JSON；图像像素在相机区检查。"""
     if isinstance(value, np.ndarray):
-        return value.tolist()
+        return json_value(value.tolist())
     if isinstance(value, np.generic):
-        return value.item()
+        return json_value(value.item())
+    if isinstance(value, float) and not isfinite(value):
+        return None
     if isinstance(value, dict):
         return {key: json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

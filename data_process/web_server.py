@@ -84,6 +84,10 @@ class BrowserHandler(BaseHTTPRequestHandler):
                 self.send_json(app.start_quality(body), HTTPStatus.ACCEPTED)
             elif url.path == "/api/quality/stop":
                 self.send_json(app.stop_quality(body.get("id")))
+            elif url.path == "/api/quality/import":
+                self.send_json(app.import_quality(body.get("path")))
+            elif url.path == "/api/quality/save":
+                self.send_json(app.save_quality(body.get("id")))
             else:
                 raise KeyError("接口不存在")
         elif url.path == "/api/info":
@@ -95,7 +99,14 @@ class BrowserHandler(BaseHTTPRequestHandler):
         elif url.path == "/api/image":
             self.send_content(app.image_data(int(query["episode"][0]), int(query["frame"][0]), query["camera"][0]), "image/png")
         elif url.path == "/api/quality/status":
-            self.send_json(app.quality_status(query["id"][0]))
+            since = int(query['since'][0]) if 'since' in query else None
+            self.send_json(app.quality_status(query["id"][0], since))
+        elif url.path == '/api/quality/episode':
+            self.send_json(app.quality_episode(query['id'][0], int(query['episode'][0])))
+        elif url.path == '/api/quality/active':
+            self.send_json(app.quality_active())
+        elif url.path == '/api/quality/history':
+            self.send_json(app.quality_history())
         elif url.path in STATIC_FILES:
             name, mime = STATIC_FILES[url.path]
             content = (WEB_DIRECTORY / name).read_bytes()

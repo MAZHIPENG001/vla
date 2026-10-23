@@ -1,5 +1,5 @@
 // 曲线绘制、维度选择、缩放及跳帧手势。
-import {$, state, palette, format, run, canvasContext} from './common.js';
+import {$, state, palette, format, run, canvasContext, findings, anomalyStyles, visibleFrame, frameRanges} from './common.js';
 
 let geometry = null;
 let drag = null;
@@ -32,7 +32,7 @@ export function drawChart() {
     if (!w || !h || !state.episode) return;
     const episode = state.episode;
     const [start, end] = bounds();
-    const left = 62, right = w - 15, top = 12, bottom = h - 30;
+    const left = 62, right = w - 15, top = 44, bottom = h - 30;
     let low = Infinity, high = -Infinity;
     for (const data of [episode.state, episode.action]) {
         if (!data) continue;
@@ -53,6 +53,38 @@ export function drawChart() {
     const x = frame => left + (frame - start) / (end - start) * (right - left);
     const y = value => bottom - (value - low) / (high - low) * (bottom - top);
     geometry = {left, right, top, bottom, start, end};
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, 0, right - left, bottom);
+    ctx.clip();
+    if (state.frameRanges !== null) {
+        ctx.fillStyle = '#657388';
+        ctx.globalAlpha = .12;
+        let previous = start - .5;
+        for (const [a, b] of frameRanges(episode.index)) {
+            if (b < start || a > end) continue;
+            const next = Math.max(start - .5, a - .5);
+            if (next > previous) ctx.fillRect(x(previous), top, x(next) - x(previous), bottom - top);
+            previous = Math.max(previous, b + .5);
+        }
+        if (previous < end + .5) ctx.fillRect(x(previous), top, x(end + .5) - x(previous), bottom - top);
+    }
+    for (const segment of visibleSegments()) {
+        const color = anomalyStyles[segment.type].color;
+        const a = x(segment.start_frame - .5), b = x(segment.end_frame + .5);
+        const lane = Object.keys(anomalyStyles).indexOf(segment.type);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = segment.status === 'waiting' ? .035 : .08;
+        ctx.fillRect(a, top, Math.max(2, b - a), bottom - top);
+        ctx.globalAlpha = segment.status === 'waiting' ? .3 : .85;
+        ctx.fillRect(a, 5 + lane * 5, Math.max(3, b - a), 4);
+        if (state.selectedSegment?.id === segment.id) {
+            ctx.globalAlpha = .8;
+            ctx.strokeStyle = color;
+            ctx.strokeRect(a, top, Math.max(2, b - a), bottom - top);
+        }
+    }
+    ctx.restore();
     ctx.font = '10px sans-serif';
     ctx.fillStyle = '#8894a1';
     ctx.strokeStyle = '#e9eef3';
@@ -81,7 +113,7 @@ export function drawChart() {
             let pen = false;
             for (let frame = Math.max(0, Math.floor(start)); frame <= Math.min(episode.length - 1, Math.ceil(end)); frame++) {
                 const value = data[frame]?.[dimension];
-                if (value == null || !Number.isFinite(value)) { pen = false; continue; }
+                if (value == null || !Number.isFinite(value) || !visibleFrame(episode.index, frame)) { pen = false; continue; }
                 if (pen) ctx.lineTo(x(frame), y(value));
                 else ctx.moveTo(x(frame), y(value));
                 pen = true;
@@ -105,7 +137,24 @@ function frameAt(event) {
     return geometry.start + (px - geometry.left) / (geometry.right - geometry.left) * (geometry.end - geometry.start);
 }
 
-export function bindChart(seek) {
+function visibleSegments() {
+    return (findings(state.episode?.index)?.segments || []).filter(segment =>
+        state.anomalyTypes.has(segment.type) && (segment.status !== 'waiting' || state.showWaiting));
+}
+
+export function bindChart(seek, onSelectSegment, onChange) {
+    for (const [type, style] of Object.entries(anomalyStyles)) {
+        const label = document.createElement('label');
+        label.style.color = style.color;
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = true;
+        input.dataset.anomalyType = type;
+        input.onchange = () => { input.checked ? state.anomalyTypes.add(type) : state.anomalyTypes.delete(type); drawChart(); onChange(); };
+        label.append(input, document.createTextNode(style.label));
+        $('anomalyLegend').append(label);
+    }
+    $('showWaiting').onchange = () => { state.showWaiting = $('showWaiting').checked; drawChart(); onChange(); };
     $('allDimensions').onclick = () => {
         state.dims = new Set(Array.from({
             length: Math.max(state.info.schema.state.names.length, state.info.schema.action.names.length),
@@ -123,7 +172,12 @@ export function bindChart(seek) {
     };
     $('chart').onpointerup = run(event => {
         if (drag) { drag = null; return; }
-        if (state.episode) return seek(frameAt(event));
+        if (state.episode) {
+            const frame = Math.round(frameAt(event));
+            const segment = visibleSegments().find(s => s.start_frame <= frame && frame <= s.end_frame);
+            if (segment) onSelectSegment(segment, false);
+            return seek(frame);
+        }
     });
     $('chart').onpointercancel = () => { drag = null; };
     $('chart').onpointermove = event => {
@@ -140,6 +194,9 @@ export function bindChart(seek) {
         const lines = [`Frame ${frame} · ${format(state.episode.times[frame])} s`];
         for (const dimension of state.dims) {
             lines.push(`${dimension}: S ${format(state.episode.state?.[frame]?.[dimension])} / A ${format(state.episode.action?.[frame]?.[dimension])}`);
+        }
+        for (const segment of visibleSegments().filter(s => s.start_frame <= frame && frame <= s.end_frame)) {
+            lines.push(`${anomalyStyles[segment.type].label} ${segment.status === 'waiting' ? '等待' : '疑似异常'} · ${segment.role || segment.check} · ${segment.start_frame}–${segment.end_frame}`);
         }
         $('chartTooltip').textContent = lines.join('\n');
         $('chartTooltip').hidden = false;

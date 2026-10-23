@@ -47,6 +47,7 @@ wandb/
 outputs/
 checkpoints/
 /results/
+/data_process/output/
 *.log
 *.log.*
 nohup.out

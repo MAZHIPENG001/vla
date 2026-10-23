@@ -9,6 +9,7 @@ import tempfile
 import shutil
 import time
 import unittest
+from threading import Event
 
 import numpy as np
 from PIL import Image
@@ -24,6 +25,7 @@ from data_process.application import BrowserApplication, clean_json
 class BrowserTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.results = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         (root / 'meta').mkdir()
         (root / 'data').mkdir()
@@ -50,12 +52,13 @@ class BrowserTests(unittest.TestCase):
                                       + [dict(bytes=b'broken',path=None)]))
             pq.write_table(table,root/f'data/episode_{eid:06d}.parquet')
         self.before = {str(p.relative_to(root)):p.read_bytes() for p in root.rglob('*') if p.is_file()}
-        self.app = BrowserApplication(BrowserModel(root),2)
+        self.app = BrowserApplication(BrowserModel(root),2, report_root=self.results.name)
 
     def tearDown(self):
         self.app.close()
         self.assertEqual(self.before,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
         self.temp.cleanup()
+        self.results.cleanup()
 
     def wait_job(self, job):
         deadline=time.monotonic()+5
@@ -93,7 +96,7 @@ class BrowserTests(unittest.TestCase):
         report = QualityInspector(self.root).inspect([0])
         check = next(item for item in report['episodes'][0]['checks']
                      if item['name'] == 'image_integrity:wrist_image')
-        self.assertEqual(check['status'], 'rejected')
+        self.assertEqual(check['status'], 'flagged')
         self.assertEqual(check['frames'], [7])
 
     def test_invalid_episode_and_frame(self):
@@ -123,7 +126,8 @@ class BrowserTests(unittest.TestCase):
         self.assertFalse(report['source_modified'])
         self.assertEqual(report['scope_episode_ids'],[2])
         self.assertEqual(report['summary']['checked_frames'],8)
-        self.assertEqual(len(report['summary']['funnel']),7)
+        self.assertEqual(len(report['summary']['by_type']),7)
+        self.assertEqual(report['selection_unit'], 'frame_segment')
         json.dumps(report,allow_nan=False)
 
     def test_quality_cancel_partial_report(self):
@@ -224,6 +228,137 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(args.host,'127.0.0.1')
         self.assertTrue(args.no_browser)
         self.assertEqual(args.port,9000)
+
+    def test_report_folder_round_trip_and_lazy_details(self):
+        from data_process.report_store import ReportBundle
+        job = self.app.start_quality({'episode_ids': [0, 2]})
+        result = self.wait_job(job)
+        self.assertEqual(result['status'], 'done', result.get('error'))
+        folder = Path(result['report_path'])
+        self.assertEqual(len(list((folder / 'episodes').glob('*.json.gz'))), 2)
+        index = result['report']['episodes'][0]
+        self.assertNotIn('frame_flags', index)
+        self.assertNotIn('checks', index)
+        self.assertTrue(all('samples' not in s for s in index['segments']))
+        raw = self.app.quality_episode(job['id'], 0)
+        self.assertTrue(raw['frame_flags'])
+        opened = ReportBundle.open(folder / 'manifest.json', self.app.model)
+        self.assertFalse(opened.cache)
+        self.assertEqual(opened.get_episode(0), raw)
+        self.assertEqual(opened.report()['summary'], result['report']['summary'])
+        saved = self.app.save_quality(job['id'])
+        self.assertEqual(saved['path'], str(folder))
+        self.assertEqual(saved['episodes'], 2)
+        again = self.app.import_quality(str(folder))
+        self.assertNotEqual(again['id'], job['id'])
+        self.assertEqual(self.app.quality_episode(again['id'], 0), raw)
+
+    def test_realtime_partial_episode_and_incremental_poll(self):
+        entered, resume = Event(), Event()
+        original = self.app.inspector._synchronization
+        def delayed(episode, policy, add):
+            entered.set()
+            self.assertTrue(resume.wait(4))
+            original(episode, policy, add)
+        self.app.inspector._synchronization = delayed
+        job = self.app.start_quality({'episode_ids': [0]})
+        try:
+            self.assertTrue(entered.wait(3))
+            status = self.app.quality_status(job['id'], -1)
+            self.assertEqual(status['status'], 'running')
+            self.assertEqual(status['completed'], 0)
+            self.assertGreater(status['report']['summary']['suspect_frames'], 0)
+            self.assertFalse(status['report']['episodes'][0]['episode_complete'])
+            self.assertTrue(self.app.quality_episode(job['id'], 0)['frame_flags'])
+            delta = self.app.quality_status(job['id'], status['revision'])
+            self.assertFalse(delta['reset'])
+            self.assertEqual(delta['report']['episodes'], [])
+            self.assertEqual(delta['report']['summary'], status['report']['summary'])
+            with self.assertRaisesRegex(ValueError, '自动保存'):
+                self.app.save_quality(job['id'])
+            with self.assertRaisesRegex(ValueError, '停止'):
+                self.app.import_quality(status['report_path'])
+        finally:
+            resume.set()
+        complete = self.wait_job(job)
+        self.assertTrue(complete['report']['complete'])
+        final_delta = self.app.quality_status(job['id'], status['revision'])
+        self.assertTrue(final_delta['report']['episodes'][0]['episode_complete'])
+
+    def test_cancel_discards_only_unfinished_live_episode(self):
+        from concurrent.futures import CancelledError
+        from data_process.report_store import ReportBundle
+        entered, resume = Event(), Event()
+        def delayed(episode, policy, add):
+            entered.set()
+            resume.wait(4)
+            raise CancelledError()
+        self.app.inspector._synchronization = delayed
+        job = self.app.start_quality({'episode_ids': [0, 2]})
+        try:
+            self.assertTrue(entered.wait(3))
+            live = self.app.quality_status(job['id'])
+            self.assertEqual(live['episode_ids'], [0])
+            self.app.stop_quality(job['id'])
+        finally:
+            resume.set()
+        stopped = self.wait_job(job)
+        self.assertFalse(stopped['report']['complete'])
+        self.assertEqual(stopped['episode_ids'], [])
+        delta = self.app.quality_status(job['id'], live['revision'])
+        self.assertEqual(delta['episode_ids'], [])
+        self.assertFalse(ReportBundle.open(stopped['report_path'], self.app.model).rows)
+
+    def test_legacy_json_import_converts_and_preserves_original(self):
+        from data_process.processing import QualityInspector
+        report = QualityInspector(self.root).inspect([0, 2])
+        path = Path(self.results.name) / 'old.json'
+        path.write_text(json.dumps(report), encoding='utf-8')
+        before = path.read_bytes()
+        activated = self.app.import_quality(str(path))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue((Path(activated['report_path']) / 'manifest.json').is_file())
+        self.assertEqual(self.app.quality_episode(activated['id'], 2), report['episodes'][1])
+        report['episodes'][0]['segments'][0]['end_frame'] = 99999
+        path.write_text(json.dumps(report), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '越界'):
+            self.app.import_quality(str(path))
+        self.assertEqual(self.app.quality_active()['id'], activated['id'])
+
+    def test_report_restore_after_application_restart(self):
+        job = self.app.start_quality({'episode_ids': [2]})
+        result = self.wait_job(job)
+        restored = BrowserApplication(BrowserModel(self.root), report_root=self.results.name)
+        try:
+            active = restored.quality_active()
+            self.assertTrue(active['id'])
+            self.assertEqual(active['report_path'], result['report_path'])
+            report = restored.quality_status(active['id'])['report']
+            self.assertTrue(report['complete'])
+            self.assertEqual(report['summary'], result['report']['summary'])
+        finally:
+            restored.close()
+
+    def test_import_validates_dataset_and_changed_source_fingerprint(self):
+        from data_process.report_store import ReportBundle
+        job = self.app.start_quality({'episode_ids': [0]})
+        result = self.wait_job(job)
+        folder = Path(result['report_path'])
+        with self.alternate_dataset() as other:
+            with self.assertRaisesRegex(ValueError, '不一致'):
+                ReportBundle.open(folder, BrowserModel(other))
+        index_path = folder / 'index.jsonl'
+        index = json.loads(index_path.read_text())
+        index['input_file']['mtime_ns'] += 1
+        index_path.write_text(json.dumps(index) + '\n')
+        with self.assertRaisesRegex(ValueError, '已改变'):
+            ReportBundle.open(folder, self.app.model)
+
+    def test_report_output_must_be_outside_source_dataset(self):
+        with self.assertRaisesRegex(ValueError, '之外'):
+            self.app.start_quality({'episode_ids': [0], 'output_root': str(self.root / 'output')})
+        self.assertIsNone(self.app.job)
+        self.assertFalse((self.root / 'output').exists())
 
 
 if __name__=='__main__':
