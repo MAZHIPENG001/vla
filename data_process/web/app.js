@@ -3,6 +3,7 @@ import {$, state, api, pretty, format, error, run, cell, button, tasks, taskIds,
 import {bindChart, drawChart, renderDimensions} from './chart.js';
 import {bindStatistics, renderStats} from './statistics.js';
 import {bindQuality} from './quality.js';
+import {bindDataset} from './dataset.js';
 
 function renderNavigation() {
     const list = tasks(), ids = visibleIds();
@@ -243,7 +244,7 @@ function moveEpisode(delta) {
 
 function openImage(episode, frame, camera) {
     $('imageTitle').textContent = `${camera} · Episode ${episode} · Frame ${frame}`;
-    $('fullImage').src = `/api/image?episode=${episode}&frame=${frame}&camera=${encodeURIComponent(camera)}`;
+    $('fullImage').src = `/api/image?episode=${episode}&frame=${frame}&camera=${encodeURIComponent(camera)}&dataset=${encodeURIComponent(state.info.dataset_id)}`;
     $('imageDialog').showModal();
 }
 
@@ -303,6 +304,7 @@ async function openOriginalEpisode(id, frame) {
 async function init() {
     state.info = await api('/api/info');
     $('datasetPath').textContent = state.info.path;
+    bindDataset(stop);
     bindNavigation();
     bindChart(seek);
     bindStatistics(selectTask);

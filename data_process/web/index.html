@@ -39,6 +39,27 @@
     </button>
    </div>
   </header>
+  <form class="dataset-selector" id="datasetForm">
+   <label for="datasetInput">数据集路径</label>
+   <input id="datasetInput" type="text" placeholder="输入数据集根目录，例如 /home/ma/vla/playground/Dataset/piper_dataset" required autocomplete="off" spellcheck="false"/>
+   <button id="browseDataset" type="button">选择文件夹</button>
+   <button class="primary" id="openDataset" type="submit">打开数据集</button>
+   <span class="muted" id="datasetStatus" role="status">选择运行服务的机器上的 LeRobot 数据集目录</span>
+  </form>
+  <dialog id="directoryDialog">
+   <div class="section-title">
+    <h2>选择数据集文件夹</h2>
+    <button type="button" data-close="directoryDialog">关闭</button>
+   </div>
+   <form class="directory-controls" id="directoryForm">
+    <input id="directoryInput" type="text" aria-label="浏览的目录路径" autocomplete="off" spellcheck="false" required/>
+    <button type="submit">转到</button>
+    <button id="directoryParent" type="button">上一级</button>
+   </form>
+   <p class="muted" id="directoryStatus" role="status">选择服务所在机器上的目录</p>
+   <div id="directoryList" class="directory-list"></div>
+   <div class="actions"><button class="primary" id="chooseDirectory" type="button" disabled>打开此数据集</button></div>
+  </dialog>
   <div hidden="" id="error" role="alert">
   </div>
   <div class="overview" id="overview">

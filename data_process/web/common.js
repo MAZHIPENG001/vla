@@ -36,10 +36,13 @@ export function error(err) {
 export async function api(path, body, signal) {
     const response = await fetch(path, {
         method: body ? 'POST' : 'GET',
-        headers: body ? {
-            'Content-Type': 'application/json',
-            'X-Data-Process-Token': document.querySelector('meta[name=api-token]').content,
-        } : {},
+        headers: {
+            ...(state.info?.dataset_id ? {'X-Data-Process-Dataset': state.info.dataset_id} : {}),
+            ...(body ? {
+                'Content-Type': 'application/json',
+                'X-Data-Process-Token': document.querySelector('meta[name=api-token]').content,
+            } : {}),
+        },
         body: body ? JSON.stringify(body) : undefined,
         signal,
     });

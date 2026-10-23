@@ -1,10 +1,12 @@
 """浏览器数据适配及后台检查回归测试；小型临时 LeRobot 数据集。"""
 
 from dataclasses import asdict
+from contextlib import contextmanager
 from io import BytesIO
 import json
 from pathlib import Path
 import tempfile
+import shutil
 import time
 import unittest
 
@@ -139,6 +141,83 @@ class BrowserTests(unittest.TestCase):
 
     def test_json_nonfinite(self):
         self.assertEqual(clean_json({'data':np.array([1,np.nan,np.inf])}),{'data':[1.,None,None]})
+
+    @contextmanager
+    def alternate_dataset(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(self.root, root, dirs_exist_ok=True)
+            info_path = root / 'meta/info.json'
+            info = json.loads(info_path.read_text())
+            info['features'].pop('wrist_image')
+            for old, new in [('state', 'observation.state'), ('actions', 'action')]:
+                info['features'][new] = info['features'].pop(old)
+                info['features'][new]['shape'] = [1]
+            info_path.write_text(json.dumps(info))
+            for path in (root / 'data').glob('*.parquet'):
+                original = pq.read_table(path).to_pydict()
+                table = pa.table({
+                    'observation.state': [[42.]] * 8,
+                    'action': [[43.]] * 8,
+                    'timestamp': original['timestamp'],
+                    'frame_index': original['frame_index'],
+                    'image': original['image'],
+                })
+                pq.write_table(table, path)
+            yield root
+
+    def test_switch_dataset_resets_cached_data_and_report(self):
+        self.app.episode_data(0)
+        job = self.app.start_quality({'episode_ids': [0], 'policy': {'inspect_images': False}})
+        self.wait_job(job)
+        revision = self.app.dataset_id
+        with self.alternate_dataset() as root:
+            before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            info = self.app.open_dataset(str(root))
+            self.assertEqual(info['path'], str(root))
+            self.assertNotEqual(info['dataset_id'], revision)
+            self.assertIsNone(info['initial_episode'])
+            self.assertIsNone(self.app.job)
+            self.assertEqual(info['schema']['state']['key'], 'observation.state')
+            frame = self.app.frame_data(0, 4)
+            self.assertEqual(frame['values']['observation.state'], [42.])
+            self.assertEqual(set(frame['images']), {'image'})
+            self.assertEqual(before, {str(p.relative_to(root)): p.read_bytes()
+                                      for p in root.rglob('*') if p.is_file()})
+
+    def test_invalid_dataset_keeps_current_source(self):
+        model, revision = self.app.model, self.app.dataset_id
+        for path in ['', None, str(self.root / 'missing'), str(self.root / 'data')]:
+            with self.assertRaises(ValueError):
+                self.app.open_dataset(path)
+            self.assertIs(self.app.model, model)
+            self.assertEqual(self.app.dataset_id, revision)
+        with self.alternate_dataset() as root:
+            (root / 'data/episode_000000.parquet').write_bytes(b'broken')
+            with self.assertRaises(ValueError):
+                self.app.open_dataset(str(root))
+            self.assertIs(self.app.model, model)
+        self.assertEqual(self.app.episode_data(0)['state'][0], [0., 1.])
+
+    def test_running_quality_blocks_dataset_switch(self):
+        self.app.inspector.inspect = self.cancelled_inspect
+        job = self.app.start_quality({'episode_ids': [0, 2]})
+        with self.assertRaisesRegex(ValueError, '先.*停止'):
+            self.app.open_dataset(str(self.root))
+        self.app.stop_quality(job['id'])
+        self.assertFalse(self.wait_job(job)['report']['complete'])
+
+    def test_browse_service_directories(self):
+        result = self.app.directories()
+        self.assertEqual(result['path'], str(self.root))
+        self.assertTrue(result['is_dataset'])
+        self.assertEqual([row['name'] for row in result['directories']], ['data', 'meta'])
+        result = self.app.directories(str(self.root / 'meta'))
+        self.assertEqual(result['parent'], str(self.root))
+        self.assertFalse(result['is_dataset'])
+        self.assertEqual(result['directories'], [])
+        with self.assertRaises(ValueError):
+            self.app.directories(str(self.root / 'missing'))
 
     def test_cli_browser_options(self):
         args=build_parser().parse_args(['view','--no-browser','--port','9000'])

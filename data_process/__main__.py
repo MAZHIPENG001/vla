@@ -1,4 +1,8 @@
-"""命令行入口：浏览器服务 view 与终端单帧读取 read。"""
+"""
+命令行入口：浏览器服务 view 与终端单帧读取 read。
+uv run python -m data_process read
+uv run python -m data_process view
+"""
 
 import argparse
 from pathlib import Path

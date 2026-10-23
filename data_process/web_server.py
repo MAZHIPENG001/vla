@@ -16,7 +16,7 @@ STATIC_FILES = {
     "/": ("index.html", "text/html"),
     "/style.css": ("style.css", "text/css"),
     **{f"/{name}.js": (f"{name}.js", "text/javascript")
-       for name in ("app", "common", "chart", "statistics", "quality")},
+       for name in ("app", "common", "chart", "statistics", "quality", "dataset")},
 }
 
 
@@ -76,7 +76,11 @@ class BrowserHandler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError("请求必须为 JSON 对象")
-            if url.path == "/api/quality/start":
+            if url.path == "/api/dataset/open":
+                self.send_json(app.open_dataset(body.get("path")))
+            elif url.path == "/api/directories":
+                self.send_json(app.directories(body.get("path")))
+            elif url.path == "/api/quality/start":
                 self.send_json(app.start_quality(body), HTTPStatus.ACCEPTED)
             elif url.path == "/api/quality/stop":
                 self.send_json(app.stop_quality(body.get("id")))
@@ -103,7 +107,15 @@ class BrowserHandler(BaseHTTPRequestHandler):
 
     def _handle(self, post=False):
         try:
-            self._dispatch(post)
+            # 数据集切换与数据请求共用锁，校验和读取之间不能换源。
+            app = self.server.app
+            with app.data_lock:
+                url = urlsplit(self.path)
+                revision = self.headers.get("X-Data-Process-Dataset") or parse_qs(url.query).get("dataset", [None])[0]
+                if url.path.startswith("/api/") and url.path not in {"/api/info", "/api/directories"}:
+                    if revision is not None and revision != app.dataset_id:
+                        raise ValueError("数据集已在其他页面切换，请刷新页面后继续操作")
+                self._dispatch(post)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except PermissionError as exc:

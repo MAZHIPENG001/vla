@@ -637,3 +637,55 @@ progress {
         grid-template-columns:minmax(0,1fr) minmax(0,1fr);
     }
 }
+
+.dataset-selector {
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+    padding:14px 26px;
+    background:white;
+    border-bottom:1px solid var(--border);
+}
+
+#datasetInput {
+    flex:1;
+    min-width:200px;
+    font-family:monospace;
+}
+
+#datasetStatus {
+    flex-basis:100%;
+}
+
+.directory-controls {
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+}
+
+#directoryInput {
+    flex:1;
+    min-width:180px;
+    font-family:monospace;
+}
+
+.directory-list {
+    display:grid;
+    grid-template-columns:minmax(0,1fr);
+    max-height:50vh;
+    overflow:auto;
+    gap:5px;
+    margin:14px 0;
+}
+
+.directory-list button {
+    text-align:left;
+    white-space:normal;
+    overflow-wrap:anywhere;
+}
+
+@media(max-width:700px) {
+    .dataset-selector { padding:14px; }
+    #datasetInput { flex-basis:100%; }
+}

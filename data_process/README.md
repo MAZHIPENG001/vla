@@ -24,7 +24,9 @@ uv pip install --python .venv/bin/python -r data_process/requirements.txt
 ```
 
 默认地址为 **http://127.0.0.1:8765**，按 `Ctrl+C` 停止。默认数据路径为项目下的
-`playground/Dataset/demo_clean_repo`，可用 `--path` 覆盖。无需桌面显示服务、前端构建或 CDN。
+`playground/Dataset/demo_clean_repo`，可用 `--path` 覆盖。也可在页面顶部输入路径并点击 **打开数据集**，或通过 **选择文件夹** 浏览服务所在机器的目录。
+路径支持绝对路径、相对服务启动目录的路径和 `~`。切换失败保留当前数据；质量检查运行时需先停止检查。
+切换成功后重置轨迹、播放、预览和质量结果，同一服务的其他页面需要刷新。无需桌面显示服务、前端构建或 CDN。
 
 远程访问可使用 `ssh -L 8765:127.0.0.1:8765 user@server`，然后在远端运行 `view --no-browser`。
 `--host 0.0.0.0` 可供受信任局域网访问；服务没有登录系统，默认仅监听本机。
@@ -45,6 +47,7 @@ data_process/
 │   ├── style.css    # 页面样式和窄屏布局
 │   ├── common.js    # 共享浏览状态、数据范围与通用操作
 │   ├── app.js       # 页面入口、导航、帧同步和播放
+│   ├── dataset.js   # 数据路径选择、目录浏览及切换
 │   ├── chart.js     # 曲线、维度选择与缩放手势
 │   ├── statistics.js # Task 统计、分布图和 CSV 下载
 │   └── quality.js   # 质量表单、任务轮询、报告与筛选预览
@@ -60,6 +63,8 @@ data_process/
 
 浏览 API：`GET /api/info`、`/api/episode?episode=0`、`/api/frame?episode=0&frame=10`、
 `/api/image?episode=0&frame=10&camera=image`。
+数据集切换：`POST /api/dataset/open`，请求体为 `{"path":"/path/to/dataset"}`；
+目录浏览：`POST /api/directories`，请求体为 `{"path":"/path/to/folder"}`。
 质量任务：`POST /api/quality/start`、`POST /api/quality/stop`、`GET /api/quality/status?id=…`。
 POST 使用页面令牌和同源校验；源数据没有写入接口。
 
