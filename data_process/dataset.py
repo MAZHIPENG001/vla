@@ -8,7 +8,7 @@ LeRobot v2 数据访问：
 公共入口
     LeRobotReader(原始数据)与 BrowserModel(浏览和分析)
     
-    !该模块不依赖桌面界面，不修改原始数据集。
+    该模块不依赖界面或 HTTP 服务，不修改原始数据集。
 """
 
 from bisect import bisect_right
@@ -148,6 +148,31 @@ class LeRobotReader:
             raise IndexError(f"帧索引超出轨迹 {episode_index} 范围: {frame_index}")
         table = self._read_table(episode_index, columns)
         return self._convert_frame(table.slice(frame_index, 1).to_pylist()[0])
+
+    def read_image_frame(
+        self, episode_index: int, frame_index: int, cameras: Sequence[str],
+    ) -> tuple[dict[str, np.ndarray], dict[str, str]]:
+        """一起读取相机列并分别解码；单路损坏不会阻止查看其他相机。"""
+        if episode_index not in self.episodes:
+            raise IndexError(f"轨迹不存在: {episode_index}")
+        length = self.episodes[episode_index]["length"]
+        if frame_index < 0:
+            frame_index += length
+        if not 0 <= frame_index < length:
+            raise IndexError(f"帧索引超出轨迹 {episode_index} 范围: {frame_index}")
+        if not cameras:
+            return {}, {}
+        if any(self.features.get(key, {}).get("dtype") != "image" for key in cameras):
+            raise ValueError("相机字段必须为内嵌 image 类型")
+        table = self._read_table(episode_index, cameras)
+        row = table.slice(frame_index, 1).to_pylist()[0]
+        images, errors = {}, {}
+        for camera in cameras:
+            try:
+                images[camera] = self._decode_image(row[camera])
+            except Exception as exc:
+                errors[camera] = str(exc)
+        return images, errors
 
     def __getitem__(self, index: int) -> dict:
         """按全局帧索引读取，轨迹按 episode_index 升序排列，支持负索引。"""
@@ -294,7 +319,7 @@ class EpisodeData:
 
 
 class BrowserModel:
-    """通过同一读取器提供统计、数值与图像；GUI 在单一工作线程中调用。"""
+    """通过同一读取器提供统计、数值与图像；调用方需串行访问同一实例。"""
 
     def __init__(
         self, path: str | Path = DEFAULT_DATA_PATH, *,

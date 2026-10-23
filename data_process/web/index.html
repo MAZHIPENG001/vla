@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+ <head>
+  <meta charset="utf-8"/>
+  <meta content="width=device-width, initial-scale=1" name="viewport"/>
+  <meta content="__API_TOKEN__" name="api-token"/>
+  <title>
+   LeRobot · 数据浏览器
+  </title>
+  <link href="/style.css" rel="stylesheet"/>
+  <script src="/app.js" type="module">
+  </script>
+ </head>
+ <body>
+  <header>
+   <div>
+    <strong>
+     <span class="brand">
+      ◈
+     </span>
+     LeRobot
+     <span class="muted">
+      / 数据工作台
+     </span>
+    </strong>
+    <div class="path" id="datasetPath">
+     正在连接本地数据集…
+    </div>
+   </div>
+   <div class="actions">
+    <span class="tag">
+     源数据只读
+    </span>
+    <button id="statsButton">
+     Task 统计
+    </button>
+    <button class="primary" id="qualityButton">
+     质量筛选
+    </button>
+   </div>
+  </header>
+  <div hidden="" id="error" role="alert">
+  </div>
+  <div class="overview" id="overview">
+  </div>
+  <div class="banner" hidden="" id="previewBanner">
+   正在预览本轮保留候选
+   <button id="resetPreview">
+    恢复全部数据
+   </button>
+  </div>
+  <main>
+   <aside>
+    <section>
+     <div class="section-title">
+      <h2>
+       任务
+       <small>
+        Task
+       </small>
+      </h2>
+      <span id="taskCount">
+      </span>
+     </div>
+     <input aria-label="搜索任务" id="taskSearch" placeholder="搜索任务名称…" type="search"/>
+     <div class="list tasks" id="tasks">
+     </div>
+    </section>
+    <section>
+     <div class="section-title">
+      <h2>
+       轨迹
+       <small>
+        Episode
+       </small>
+      </h2>
+      <span id="episodeCount">
+      </span>
+     </div>
+     <form id="episodeJump">
+      <input aria-label="Episode 编号" id="episodeId" min="0" placeholder="Episode 编号" required="" type="number"/>
+      <button>
+       定位
+      </button>
+     </form>
+     <div class="list episodes" id="episodes">
+     </div>
+    </section>
+   </aside>
+   <div class="workspace">
+    <section class="panel">
+     <div class="section-title">
+      <h2 id="episodeTitle">
+       选择一条轨迹
+      </h2>
+      <div class="actions">
+       <button id="previousEpisode">
+        上一条
+       </button>
+       <button id="nextEpisode">
+        下一条
+       </button>
+       <button id="metadataButton">
+        元数据
+       </button>
+      </div>
+     </div>
+     <p class="muted" id="episodeInfo">
+     </p>
+     <div class="cameras" id="cameras">
+      <p class="empty">
+       加载后在此同步显示相机画面
+      </p>
+     </div>
+     <div class="transport">
+      <button class="primary" disabled="" id="play">
+       ▶ 播放
+      </button>
+      <input aria-label="当前帧" disabled="" id="frameSlider" max="0" min="0" type="range" value="0"/>
+      <input aria-label="帧号" disabled="" id="frameNumber" min="0" type="number" value="0"/>
+      <span class="muted" id="frameTotal">
+       / 0
+      </span>
+      <select aria-label="播放速度" id="speed">
+       <option value="0.25">
+        0.25×
+       </option>
+       <option value="0.5">
+        0.5×
+       </option>
+       <option selected="" value="1">
+        1×
+       </option>
+       <option value="2">
+        2×
+       </option>
+       <option value="4">
+        4×
+       </option>
+      </select>
+      <label>
+       <input id="loop" type="checkbox"/>
+       循环
+      </label>
+     </div>
+     <div class="muted" id="frameInfo">
+      ← / → 逐帧 · 空格播放 / 暂停 · 点击相机放大
+     </div>
+    </section>
+    <section class="panel">
+     <div class="section-title">
+      <h2>
+       轨迹曲线
+       <small>
+        State / Action
+       </small>
+      </h2>
+      <div class="actions">
+       <button id="allDimensions">
+        全选
+       </button>
+       <button id="noDimensions">
+        清空
+       </button>
+       <button id="resetZoom">
+        重置缩放
+       </button>
+      </div>
+     </div>
+     <div class="dimensions" id="dimensions">
+     </div>
+     <div class="chart-wrap">
+      <canvas aria-label="State 和 Action 轨迹曲线" id="chart">
+      </canvas>
+      <div hidden="" id="chartTooltip">
+      </div>
+     </div>
+     <div class="muted">
+      实线 State · 虚线 Action · 单击跳帧 · 滚轮缩放 · 按住 Shift 拖动平移
+     </div>
+    </section>
+    <section class="panel">
+     <div class="section-title">
+      <h2>
+       当前帧数值
+      </h2>
+      <span class="muted">
+       Action − State，按维度索引对比
+      </span>
+     </div>
+     <div class="table-wrap">
+      <table>
+       <thead>
+        <tr>
+         <th>
+          维度
+         </th>
+         <th>
+          State 名称
+         </th>
+         <th>
+          Action 名称
+         </th>
+         <th>
+          State
+         </th>
+         <th>
+          Action
+         </th>
+         <th>
+          差值
+         </th>
+        </tr>
+       </thead>
+       <tbody id="values">
+       </tbody>
+      </table>
+     </div>
+     <details>
+      <summary>
+       当前帧全部原始数值字段
+      </summary>
+      <pre id="rawValues"></pre>
+     </details>
+    </section>
+   </div>
+  </main>
+  <dialog id="metadataDialog">
+   <div class="section-title">
+    <h2>
+     Episode 元数据
+    </h2>
+    <button data-close="metadataDialog">
+     关闭
+    </button>
+   </div>
+   <pre id="metadata"></pre>
+  </dialog>
+  <dialog id="imageDialog">
+   <div class="section-title">
+    <h2 id="imageTitle">
+     原始分辨率快照
+    </h2>
+    <button data-close="imageDialog">
+     关闭
+    </button>
+   </div>
+   <img alt="当前帧原始图像" id="fullImage"/>
+  </dialog>
+  <dialog id="statsDialog">
+   <div class="section-title">
+    <h2>
+     Task 统计
+    </h2>
+    <div class="actions">
+     <button id="exportStats">
+      导出 CSV
+     </button>
+     <button data-close="statsDialog">
+      关闭
+     </button>
+    </div>
+   </div>
+   <p class="muted">
+    当前浏览范围 · 点击表头排序、点击任务跳转。多任务轨迹会分别计入各 Task。
+   </p>
+   <canvas aria-label="轨迹长度分布" id="histogram">
+   </canvas>
+   <div class="table-wrap">
+    <table>
+     <thead>
+      <tr>
+       <th>
+        <button data-sort="name">
+         任务 ↕
+        </button>
+       </th>
+       <th>
+        <button data-sort="count">
+         轨迹数 ↕
+        </button>
+       </th>
+       <th>
+        <button data-sort="total_frames">
+         总帧数 ↕
+        </button>
+       </th>
+       <th>
+        <button data-sort="mean_frames">
+         平均帧数 ↕
+        </button>
+       </th>
+       <th>
+        <button data-sort="seconds">
+         总时长(s) ↕
+        </button>
+       </th>
+      </tr>
+     </thead>
+     <tbody id="statsRows">
+     </tbody>
+    </table>
+   </div>
+  </dialog>
+  <dialog id="qualityDialog">
+   <div class="section-title">
+    <div>
+     <h2>
+      Robotic Data · 质量筛选
+     </h2>
+     <p class="muted">
+      调整阈值 → 运行检查 → 复核异常 → 预览保留候选
+     </p>
+    </div>
+    <button data-close="qualityDialog">
+     关闭
+    </button>
+   </div>
+   <form id="qualityForm">
+    <details open="">
+     <summary>
+      State / Action 阈值
+     </summary>
+     <div class="signal-settings" id="signalSettings">
+     </div>
+    </details>
+    <details>
+     <summary>
+      图像 / 时间同步设置
+     </summary>
+     <div class="settings" id="imageSettings">
+     </div>
+     <label class="wide">
+      相机独立采集时间戳映射 JSON
+      <input id="cameraClocks" placeholder='{"image":"image_timestamp"}' value="{}"/>
+     </label>
+     <p class="muted">
+      时间戳需要处于同一时钟域。缺少真实采集时间戳时，同步检查列为未验证。清晰度、Jerk 阈值需自行校准。
+     </p>
+    </details>
+    <div class="quality-controls">
+     <select aria-label="质量检查范围" id="qualityScope">
+      <option value="episode">
+       当前 Episode
+      </option>
+      <option value="task">
+       当前 Task（原始范围）
+      </option>
+      <option value="all">
+       全部数据集
+      </option>
+     </select>
+     <button class="primary" id="runQuality">
+      运行 / 重新检查
+     </button>
+     <button disabled="" id="stopQuality" type="button">
+      停止
+     </button>
+     <button disabled="" id="downloadReport" type="button">
+      保存质量报告 JSON
+     </button>
+    </div>
+   </form>
+   <progress id="qualityProgress" max="1" value="0">
+   </progress>
+   <p id="qualityStatus" role="status">
+    尚未运行。未校准或无法验证的检查会列入待复核。
+   </p>
+   <div class="quality-controls">
+    <label>
+     <input checked="" id="includeReview" type="checkbox"/>
+     包含待复核轨迹
+    </label>
+    <button disabled="" id="applyPreview">
+     预览本轮保留结果
+    </button>
+    <button id="restoreAll">
+     恢复全部数据
+    </button>
+   </div>
+   <p class="muted">
+    按整条 Episode 筛选。预览仅包含本轮范围的候选；报告可下载，原数据保持只读。关闭此面板后检查仍会继续。
+   </p>
+   <details open="">
+    <summary>
+     分阶段筛选统计
+    </summary>
+    <div class="table-wrap">
+     <table>
+      <thead>
+       <tr>
+        <th>
+         阶段
+        </th>
+        <th>
+         进入
+        </th>
+        <th>
+         剔除候选
+        </th>
+        <th>
+         剩余轨迹
+        </th>
+        <th>
+         剩余帧数
+        </th>
+       </tr>
+      </thead>
+      <tbody id="funnel">
+      </tbody>
+     </table>
+    </div>
+   </details>
+   <div class="table-wrap">
+    <table>
+     <thead>
+      <tr>
+       <th>
+        Episode
+       </th>
+       <th>
+        任务
+       </th>
+       <th>
+        帧数
+       </th>
+       <th>
+        结果
+       </th>
+       <th>
+        筛除 / 待复核原因
+       </th>
+       <th>
+        查看
+       </th>
+      </tr>
+     </thead>
+     <tbody id="qualityRows">
+     </tbody>
+    </table>
+   </div>
+   <pre id="qualityDetail">选择结果行查看完整指标与异常帧索引。</pre>
+  </dialog>
+ </body>
+</html>
