@@ -1,28 +1,27 @@
 # Install
+
+克隆项目后，在仓库根目录安装完整依赖。当前依赖固定为 Python 3.11、Linux x86_64
+和 PyTorch CUDA 12.8，需要兼容的 NVIDIA 驱动。PyTorch3D 从固定的 Git 提交构建，
+请先安装 Git、C++ 编译器及 CUDA 12.8 开发工具链（包含 `nvcc`）。
+
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
-echo 'export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple' >> ~/.bashrc
-source ~/.bashrc
-uv sync
-uv pip install ninja packaging
-uv pip install flash-attn --no-build-isolation
-uv pip install pandas
-uv pip install numpydantic
-uv pip install opencv-python
-uv pip install opencv-python-headless
-uv pip install albumentations
-uv pip install pydantic
-uv pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install qwen-vl-utils[decord]==0.0.8
-uv pip install ninja fvcore iopath
-uv pip install huggingface-hub==0.35.3
-uv pip install pyarrow
-uv pip install deepspeed
-uv pip install wandb
+uv venv --python 3.11
+uv pip install -r requirements.txt
+source .venv/bin/activate
+```
 
-uv pip install --no-build-isolation \
-  "git+https://github.com/facebookresearch/pytorch3d.git"
+`requirements.txt` 中的 `-e .` 会从当前仓库安装 `vla`，不依赖用户名或克隆路径；
+项目源码不依赖另行安装的本地 `lerobot` 仓库。PyTorch3D 的 PyTorch 构建依赖通过
+`pyproject.toml` 的 [uv 配置](https://docs.astral.sh/uv/reference/settings/#extra-build-dependencies)
+自动安装，因此安装命令需要在仓库根目录执行。
+
+按需安装额外的训练加速组件：
+
+```bash
+uv pip install ninja packaging
+uv pip install flash-attn deepspeed --no-build-isolation
 ```
 # Wandb
 ```bash

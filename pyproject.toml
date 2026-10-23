@@ -40,3 +40,13 @@ explicit = true
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
+
+# PyTorch3D's setup.py imports torch before declaring its build dependencies.
+# Keep the isolated build on the same torch wheel as requirements.txt, so a
+# fresh environment can install the requirements in one uv pip invocation.
+[tool.uv.pip.extra-build-dependencies]
+pytorch3d = [
+    "torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl",
+    "numpy==2.4.6",
+    "setuptools==81.0.0",
+]
