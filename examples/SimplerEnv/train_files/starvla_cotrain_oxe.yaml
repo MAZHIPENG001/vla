@@ -1,5 +1,5 @@
 run_id: qwenact
-run_root_dir: results/Checkpoints
+run_root_dir: playground/results/Checkpoints
 seed: 42
 wandb_entity: 1246896046-zhejiang-university-of-technology
 wandb_project: vla_simplerenv
