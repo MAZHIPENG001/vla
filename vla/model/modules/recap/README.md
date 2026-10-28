@@ -118,11 +118,21 @@ texts = condition.to_text()
 
 ### 实际权重加载测试
 
+在仓库根目录先将项目可编辑安装到运行环境（每个环境只需执行一次），再按文件路径启动：
+
+```bash
+uv pip install --python .venv/bin/python -e .
+uv run vla/model/modules/recap/recap.py
+```
+
+可编辑安装让运行环境能找到 `vla`、`deployment` 等项目包；入口使用绝对导入，
+无需在代码中修改 `sys.path`。修改源码后无需重新安装。
+
 在仓库根目录运行下列命令。该入口真实加载本地 2B 权重和处理器，测试两个不同长度指令、
 可选状态、价值损失、反向梯度、价值预测、轨迹优势和条件文本生成：
 
 ```bash
-HF_HUB_OFFLINE=1 .venv/bin/python -m vla.model.modules.recap.recap \
+HF_HUB_OFFLINE=1 uv run vla/model/modules/recap/recap.py \
   --config_yaml examples/LIBERO/train_files/starvla_cotrain_libero.yaml \
   --model_id /home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct \
   --device cpu --freeze_backbone --backward

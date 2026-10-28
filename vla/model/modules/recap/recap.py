@@ -12,9 +12,12 @@ from vla.model.framework.share_tools import (
     _to_omegaconf,
     add_discretized_state_to_instruction,
 )
-from .advantage import compute_advantage_condition, compute_advantages, estimate_task_thresholds
-from .value_model import QwenValueModel
-
+from vla.model.modules.recap.advantage import (
+    compute_advantage_condition,
+    compute_advantages,
+    estimate_task_thresholds,
+)
+from vla.model.modules.recap.value_model import QwenValueModel
 
 @dataclass
 class QwenRecapDefaultConfig:
