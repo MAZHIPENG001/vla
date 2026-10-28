@@ -222,4 +222,12 @@ if __name__ == "__main__":
     cfg = OmegaConf.load(args.config_yaml)
 
     qwen_vl = _QWen_VL_Interface(cfg)
+    if not torch.cuda.is_available():
+        raise RuntimeError("没有可用的 CUDA 显卡")
+
+    gpu_id = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[0],)
+    torch.cuda.set_device(gpu_id)
+
+    print(f"使用 cuda:{gpu_id}，{torch.cuda.get_device_name(gpu_id)}")
+    qwen_vl = _QWen_VL_Interface(cfg).to(f"cuda:{gpu_id}")
     qwen_vl.demo()
