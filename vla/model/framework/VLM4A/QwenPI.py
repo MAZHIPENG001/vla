@@ -282,7 +282,13 @@ if __name__ == "__main__":
     sample2["lang"] = "Another fake instruction for testing."
 
     batch = [sample, sample2]
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        raise RuntimeError("没有可用的 CUDA 显卡")
+
+    gpu_id = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[0],)
+    torch.cuda.set_device(gpu_id)
+    print(f"使用 cuda:{gpu_id}，{torch.cuda.get_device_name(gpu_id)}")
+    device = torch.device(f"cuda:{gpu_id}")
     model = model.to(device,dtype=torch.bfloat16)
     forward_output = model(batch)
     action_loss = forward_output["action_loss"]

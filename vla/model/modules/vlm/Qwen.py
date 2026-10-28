@@ -229,5 +229,6 @@ if __name__ == "__main__":
     torch.cuda.set_device(gpu_id)
 
     print(f"使用 cuda:{gpu_id}，{torch.cuda.get_device_name(gpu_id)}")
-    qwen_vl = _QWen_VL_Interface(cfg).to(f"cuda:{gpu_id}")
+    device = torch.device(f"cuda:{gpu_id}")
+    qwen_vl = _QWen_VL_Interface(cfg).to(device)
     qwen_vl.demo()

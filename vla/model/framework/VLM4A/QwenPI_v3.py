@@ -429,6 +429,14 @@ if __name__ == "__main__":
     args, clipargs = parser.parse_known_args()
     import os
 
+    if not torch.cuda.is_available():
+        raise RuntimeError("没有可用的 CUDA 显卡")
+
+    gpu_id = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[0],)
+    torch.cuda.set_device(gpu_id)
+    print(f"使用 cuda:{gpu_id}，{torch.cuda.get_device_name(gpu_id)}")
+    device = torch.device(f"cuda:{gpu_id}")
+
     if os.getenv("DEBUG_MODE", "0") == "1":
         debugpy.listen(("0.0.0.0", 10092))
         print("🔍 Rank 0 waiting for debugger attach on port 10092...")
@@ -438,7 +446,7 @@ if __name__ == "__main__":
     # try get model
     cfg.framework.qwenvl.base_vlm = "./playground/Pretrained_models/Qwen3-VL-4B-Instruct"
 
-    model = Qwen_PI_v3(cfg)
+    model = Qwen_PI_v3(cfg).to(device)
     # ckpt="/mnt/petrelfs/yejinhui/Projects/llavavla/results/Checkpoints/1011_qwenpi/checkpoints/need_steps_10000_pytorch_model.pt"
     # model = Qwen_PI.from_pretrained(ckpt)
     print(model)
@@ -469,7 +477,6 @@ if __name__ == "__main__":
     }
 
     batch = [sample, sample]  # batch size 2
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     forward_output = model(batch)
     action_loss = forward_output["action_loss"]
