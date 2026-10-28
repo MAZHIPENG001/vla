@@ -8,6 +8,11 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 uv venv --python 3.11
+pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+git clone https://github.com/facebookresearch/pytorch3d.git
+cd pytorch3d
+uv pip install -e . --no-build-isolation
+
 uv pip install -r requirements.txt
 source .venv/bin/activate
 ```
@@ -29,17 +34,17 @@ https://wandb.ai/authorize?ref=models
 ```
 # 激活环境
 ```bash
-source ~/vla/.venv/bin/activate
+source ./.venv/bin/activate
 export PYTHONPATH=~/vla:$PYTHONPATH
 ```
 # 模型存储位置--软连接
 ```bash
 mkdir -p /root/gpufree-data/playground
 
-rm -rf /root/vla/playground
-ln -s /root/gpufree-data/playground /root/vla/playground
-ls -ld /root/vla/playground
-readlink -f /root/vla/playground
+rm -rf ./playground
+ln -s /root/gpufree-data/playground ./playground
+ls -ld ./playground
+readlink -f ./playground
 ```
 
 # 模型验证
