@@ -1,0 +1,32 @@
+# Python 3.11. Install torch/torchvision separately before this file.
+# Install build tools first; see README.md.
+accelerate==1.15.0
+albumentations==2.0.8
+av==18.1.0
+decord==0.6.0
+diffusers==0.40.0
+einops==0.8.2
+huggingface-hub==1.31.0
+msgpack>=1.1,<2
+numpy==2.4.6
+numpydantic==1.10.0
+omegaconf==2.3.1
+opencv-python-headless==5.0.0.93
+pandas==3.0.6
+pillow==12.3.0
+psutil==7.2.2
+pyarrow==26.0.0
+pydantic==2.13.5
+pyyaml==6.0.3
+qwen-vl-utils==0.0.8
+rich==15.0.0
+safetensors==0.8.0
+tqdm==4.70.1
+transformers==5.17.0
+typer==0.27.2
+typing-extensions>=4.12,<5
+wandb==0.31.0
+websockets==17.3
+deepspeed==0.19.8
+peft==0.21.2
+pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@978cd99221b9e0a6a568f1d427854d73363265cf

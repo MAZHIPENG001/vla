@@ -4,48 +4,6 @@ version = "0.1.0"
 description = "Vision-language-action training and LeRobot dataset tools"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-dependencies = [
-    "accelerate==1.15.0",
-    "albumentations==2.0.8",
-    "av==18.1.0",
-    "decord==0.6.0",
-    "diffusers==0.40.0",
-    "einops==0.8.2",
-    "huggingface-hub==1.31.0",
-    "msgpack>=1.1,<2",
-    "ninja>=1.11",
-    "numpy==2.4.6",
-    "numpydantic==1.10.0",
-    "omegaconf==2.3.1",
-    "opencv-python-headless==5.0.0.93",
-    "pandas==3.0.6",
-    "packaging>=24",
-    "pillow==12.3.0",
-    "psutil==7.2.2",
-    "pyarrow==26.0.0",
-    "pydantic==2.13.5",
-    "pytorch3d==0.7.9",
-    "pyyaml==6.0.3",
-    "qwen-vl-utils==0.0.8",
-    "rich==15.0.0",
-    "safetensors==0.8.0",
-    "setuptools==81.0.0",
-    "tqdm==4.70.1",
-    "transformers==5.17.0",
-    "typer==0.27.2",
-    "typing-extensions>=4.12,<5",
-    "wandb==0.31.0",
-    "websockets==17.3",
-    "wheel>=0.45",
-]
-
-[project.optional-dependencies]
-train = ["deepspeed>=0.18,<1", "peft>=0.17,<1"]
-flash-attn = ["flash-attn>=2.7,<3"]
-
-[dependency-groups]
-data = ["numpy==2.4.6", "pillow==12.3.0", "pyarrow==26.0.0"]
-dev = ["debugpy>=1.8,<2"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -60,26 +18,8 @@ vla = ["config/**/*.yaml"]
 data_process = ["web/*"]
 
 [tool.uv]
-required-version = ">=0.11.7"
-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-default-groups = []
-# PyTorch is installed separately by the user, including its CUDA dependencies.
-exclude-dependencies = ["torch", "torchvision", "torchaudio"]
-# Compile extensions against the torch already installed in this environment.
-# Other project dependencies provide setuptools, wheel, ninja, packaging and numpy.
+managed = false
+
+# Build CUDA extensions with the torch already installed in the active environment.
+[tool.uv.pip]
 no-build-isolation-package = ["pytorch3d", "deepspeed", "flash-attn"]
-
-[[tool.uv.index]]
-name = "pypi"
-url = "https://pypi.org/simple"
-default = true
-
-[tool.uv.sources]
-pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "978cd99221b9e0a6a568f1d427854d73363265cf" }
-
-# Static metadata from the pinned commit avoids compiling/importing torch at lock time.
-# Update this entry together with the Git revision if PyTorch3D changes.
-[[tool.uv.dependency-metadata]]
-name = "pytorch3d"
-version = "0.7.9"
-requires-dist = ["iopath"]
