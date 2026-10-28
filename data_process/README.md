@@ -25,10 +25,11 @@
 在项目根目录运行：
 
 ```bash
-uv pip install --python .venv/bin/python -r data_process/requirements.txt
+# 仅安装数据工具依赖，无需 GPU、PyTorch 或 CUDA Toolkit
+uv sync --locked --only-group data
 
 # 启动服务并打开浏览器；省略 view 也可以
-uv run python -m data_process view
+uv run --no-sync python -m data_process view
 
 # 指定数据集和初始轨迹
 .venv/bin/python -m data_process view --path playground/Dataset/piper_dataset --episode 0
@@ -39,6 +40,10 @@ uv run python -m data_process view
 # 在终端读取一帧
 .venv/bin/python -m data_process read --path playground/Dataset/piper_dataset --episode 0 --frame 10
 ```
+
+完整模型环境的安装方式见[项目 README](../README.md)。完整环境已经包含这些依赖，
+无需再运行上面的轻量同步命令；可直接执行 `uv run --locked python -m data_process view`。
+轻量环境使用 `--no-sync`，避免运行时自动补装模型依赖。
 
 默认地址为 **http://127.0.0.1:8765**，按 `Ctrl+C` 停止。默认数据路径为项目下的
 `playground/Dataset/demo_clean_repo`，可用 `--path` 覆盖。也可在页面顶部输入路径并点击 **打开数据集**，或通过 **选择文件夹** 浏览服务所在机器的目录。
