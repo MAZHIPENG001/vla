@@ -161,7 +161,7 @@ CPU 测试冻结骨干并对价值头反向传播；小规模 Qwen 单元测试�
 
 ```python
 import torch
-from vla.model.modules.recap import QwenValueModel, compute_advantages
+from vla.model.modules.recap import AdvantageCondition, QwenValueModel
 
 critic = QwenValueModel().to("cuda")
 # 本地权重下载完整后也可使用：
@@ -192,7 +192,7 @@ critic.eval()
 predictions = critic.predict_values(batch_images, instructions)
 values = torch.zeros(rewards.shape, device=predictions.device)
 values[valid.to(values.device)] = predictions
-advantages = compute_advantages(rewards.to(values.device), values, lengths=lengths)
+advantages = AdvantageCondition.compute_advantages(rewards.to(values.device), values, lengths=lengths)
 ```
 
 恢复模型时用相同的初始化参数创建 `QwenValueModel`，再调用
@@ -202,7 +202,7 @@ advantages = compute_advantages(rewards.to(values.device), values, lengths=lengt
 
 ## 计算约定
 
-- 分布价值：`values_from_logits` 计算 `Σ softmax(logits)[b] * bin_value[b]`。
+- 分布价值：`AdvantageCondition.values_from_logits` 计算 `Σ softmax(logits)[b] * bin_value[b]`。
   默认值域为 `[-1, 0]` 的等距支撑点；论文使用 201 个 bin，也可传入模型实际使用的支撑点。
 - 奖励：非终止步为 `-1`，成功终止为 `0`，失败终止为 `-C_fail`。
   `failure_penalty` 必须显式指定；论文未给出统一数值。
@@ -223,40 +223,59 @@ advantages = compute_advantages(rewards.to(values.device), values, lengths=lengt
 不应把跨轨迹拼接数据或需要末端 bootstrap 的截断片段作为完整轨迹传入。
 所有标签计算均停止梯度，半精度输入至少以 float32 进行累计。
 
-奖励和价值必须使用相同尺度。`episode_rewards(normalization=...)` 支持每条轨迹对应任务的
+奖励和价值必须使用相同尺度。`AdvantageCondition.episode_rewards(normalization=...)` 支持每条轨迹对应任务的
 归一化除数；应与价值模型训练时保持一致。函数不会裁剪回报，失败惩罚叠加步数后可能
 超出 `[-1, 0]`；应按实际训练约定选择归一化参数和价值支撑点，不能仅裁剪某一侧。
 
 ## 使用示例
 
+`advantage.py` 提供独立的 `AdvantageModule(nn.Module)`，无需加载 Qwen 即可使用。
+`forward` 计算优势，`fit_thresholds` 标定并保存任务阈值，`make_condition` 生成条件。
+模块没有可训练参数，所有优势和标签计算均停止梯度；`train()` / `eval()` 控制条件 dropout。
+
+```python
+from vla.model.modules.recap import AdvantageModule
+
+advantage = AdvantageModule(mode="posttrain", n_steps=50, dropout_probability=0.3)
+scores = advantage(rewards, values, lengths=lengths)  # [B, T]
+thresholds = advantage.fit_thresholds(scores, task_ids, valid_mask=valid_mask)
+advantage.eval()
+condition = advantage.make_condition(scores, task_ids, valid_mask=valid_mask)
+texts = condition.to_text()
+
+# 单独使用时，将 thresholds 随实验配置保存，恢复时传回构造函数。
+restored = AdvantageModule(thresholds=thresholds).eval()
+```
+
+`QwenRecap` 通过 `recap.advantage` 组合该模块，其原有 `predict_advantages`、
+`fit_thresholds` 和 `make_condition` 接口继续可用。通过 `recap.fit_thresholds` 标定时，
+阈值同时写入共享配置，供 YAML 保存和恢复；离线标注入口也使用此模块计算优势。
+数值计算和校验函数均封装在 `AdvantageCondition` 中，文件不再提供独立函数。
+通过类方法调用，无需先创建条件对象；`compute_advantage_condition` 返回新的
+`AdvantageCondition`，保留 `indicator`、`conditioning_mask` 和 `to_text()` 接口：
+
 ```python
 import torch
-from vla.model.modules.recap import (
-    compute_advantage_condition,
-    compute_advantages,
-    episode_rewards,
-    estimate_task_thresholds,
-    values_from_logits,
-)
+from vla.model.modules.recap import AdvantageCondition
 
 lengths = torch.tensor([4, 3])
 success = torch.tensor([True, False])
-rewards = episode_rewards(
+rewards = AdvantageCondition.episode_rewards(
     lengths, success, max_steps=4, failure_penalty=5, normalization=10,
 )
 # 实际使用时替换为价值模型对各时刻观测及任务指令的预测。
 value_logits = torch.zeros(2, 4, 201)
-values = values_from_logits(value_logits)
-advantages = compute_advantages(rewards, values, lengths=lengths)  # N=50
+values = AdvantageCondition.values_from_logits(value_logits)
+advantages = AdvantageCondition.compute_advantages(rewards, values, lengths=lengths)  # N=50
 valid = torch.arange(4)[None, :] < lengths[:, None]
 task_ids = torch.tensor([0, 1])[:, None].expand_as(advantages)
 
 # 示例为简洁起见使用当前数据；实际应先在独立的代表性校准数据上估计并保存阈值。
 # 预训练使用示范数据（论文抽样 10k 点），后训练使用当前迭代的评估 rollout。
-thresholds = estimate_task_thresholds(
+thresholds = AdvantageCondition.estimate_task_thresholds(
     advantages, task_ids, stage="posttrain", valid_mask=valid,
 )
-condition = compute_advantage_condition(
+condition = AdvantageCondition.compute_advantage_condition(
     advantages, task_ids, thresholds, valid_mask=valid,
     intervention_mask=torch.zeros_like(valid),
     training=True, generator=torch.Generator().manual_seed(42),
@@ -279,12 +298,10 @@ print(condition.to_text())           # 展平为 8 个字符串，丢弃或 padd
 .venv/bin/python -m unittest discover -s vla/model/modules/recap/tests -v
 ```
 
-测试包含手算公式、不同长度轨迹的逐步参考实现、终止失败惩罚、padding、任务分位数、
-严格阈值、人工纠正、条件 dropout 和混合精度累计；CUDA 可用时额外验证设备一致性。
-价值模型测试使用随机初始化的小规模真实 Qwen3-VL，验证多模态前向、视觉/语言骨干
-和价值头梯度、冻结模式、左右 padding、价值监督离散化与 checkpoint 恢复，无需下载 2B 权重。
-配置与组件测试额外覆盖 YAML 覆盖优先级、模型路径实际传递、真实隐藏维度、状态与图像预处理、
-按批预测和变长轨迹回填、阈值配置保存/恢复，以及训练权重加载与配置不一致检查。
+当前 `test_advantage_module.py` 覆盖三种模式的手算公式、终止失败奖励、padding、
+半精度输入的 float32 累计和梯度隔离，以及任务分位数、严格阈值、人工纠正和条件 dropout。
+组件测试使用价值模型替身，验证按批预测、变长轨迹回填、父模块 train/eval 状态传播
+和阈值配置的 YAML 保存/恢复，无需下载或加载 Qwen 权重。
 
 ## Advantage 条件策略：QwenOFTRecap
 

@@ -12,11 +12,7 @@ from vla.model.framework.share_tools import (
     _to_omegaconf,
     add_discretized_state_to_instruction,
 )
-from vla.model.modules.recap.advantage import (
-    compute_advantage_condition,
-    compute_advantages,
-    estimate_task_thresholds,
-)
+from vla.model.modules.recap.advantage import AdvantageModule
 from vla.model.modules.recap.value_model import QwenValueModel
 
 @dataclass
@@ -66,6 +62,14 @@ class QwenRecap(nn.Module):
             _to_omegaconf(config),
         )
         self._validate_config()
+        advantage = self.config.recap.advantage
+        self.advantage = AdvantageModule(
+            mode=advantage.mode,
+            n_steps=advantage.n_steps,
+            positive_fraction=advantage.positive_fraction,
+            dropout_probability=advantage.dropout_probability,
+            thresholds=advantage.thresholds,
+        )
         cfg = self.config.recap.value_model
         if cfg.checkpoint is not None and not Path(cfg.checkpoint).is_file():
             raise FileNotFoundError(f"Value checkpoint not found: {cfg.checkpoint}")
@@ -89,17 +93,9 @@ class QwenRecap(nn.Module):
         cfg = self.config.recap
         if cfg.name != "QwenRecap":
             raise ValueError("recap.name must be QwenRecap")
-        advantage = cfg.advantage
-        if advantage.mode not in ("posttrain", "pretrain", "return_to_go"):
-            raise ValueError("advantage.mode must be posttrain, pretrain or return_to_go")
-        for name in ("n_steps", "prediction_batch_size"):
-            value = advantage[name]
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-                raise ValueError(f"advantage.{name} must be a positive integer")
-        if not 0 <= advantage.dropout_probability <= 1:
-            raise ValueError("advantage.dropout_probability must lie in [0, 1]")
-        if advantage.positive_fraction is not None and not 0 < advantage.positive_fraction < 1:
-            raise ValueError("advantage.positive_fraction must lie in (0, 1)")
+        batch_size = cfg.advantage.prediction_batch_size
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+            raise ValueError("advantage.prediction_batch_size must be a positive integer")
 
     @property
     def qwen_vl_interface(self):
@@ -173,30 +169,21 @@ class QwenRecap(nn.Module):
         valid = valid.to(values.device)
         lengths = lengths.to(values.device)
         values[valid] = predictions
-        cfg = self.config.recap.advantage
-        advantages = compute_advantages(
-            rewards.to(values.device), values, lengths=lengths, mode=cfg.mode, n_steps=cfg.n_steps,
-        )
+        advantages = self.advantage(rewards.to(values.device), values, lengths=lengths)
         return {"values": values, "advantages": advantages, "valid_mask": valid, "lengths": lengths}
 
     def fit_thresholds(self, advantages, task_ids, *, valid_mask=None):
         """Calibrate on representative data and store thresholds in self.config."""
-        cfg = self.config.recap.advantage
-        thresholds = estimate_task_thresholds(
-            advantages, task_ids, valid_mask=valid_mask,
-            stage="posttrain" if cfg.mode == "posttrain" else "pretrain",
-            positive_fraction=cfg.positive_fraction,
-        )
-        cfg.thresholds = thresholds
+        thresholds = self.advantage.fit_thresholds(advantages, task_ids, valid_mask=valid_mask)
+        self.config.recap.advantage.thresholds = thresholds
         return thresholds
 
     def make_condition(self, advantages, task_ids, *, valid_mask=None, intervention_mask=None, generator=None):
         """Apply saved thresholds and train/eval-dependent condition dropout."""
-        cfg = self.config.recap.advantage
-        return compute_advantage_condition(
-            advantages, task_ids, {int(task): value for task, value in cfg.thresholds.items()},
+        return self.advantage.make_condition(
+            advantages, task_ids,
             valid_mask=valid_mask, intervention_mask=intervention_mask,
-            training=self.training, dropout_probability=cfg.dropout_probability, generator=generator,
+            generator=generator,
         )
 
 

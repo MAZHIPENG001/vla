@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 import torch
 from torch.utils.data import Dataset
 
-from vla.model.modules.recap.advantage import episode_rewards
+from vla.model.modules.recap.advantage import AdvantageCondition
 
 
 def relative_path(value):
@@ -51,7 +51,8 @@ class RecapEpisodes:
     """Read every original frame, bypassing mixture sampling/pause filtering.
 
     Episodes must be complete. The final stored row is the terminal sample,
-    matching episode_rewards. Only scalar arrays stay in RAM; images are lazy.
+    matching AdvantageCondition.episode_rewards. Only scalar arrays stay in RAM;
+    images are lazy.
     """
     def __init__(self, datasets, cfg):
         self.datasets = list(datasets)
@@ -110,7 +111,7 @@ class RecapEpisodes:
                 scale = overrides.get("normalization", reward_cfg.normalization)
                 if penalty is None or scale is None:
                     raise ValueError(f"set recap.reward.failure_penalty and normalization, or task_overrides[{task_key!r}]")
-                rewards = episode_rewards(
+                rewards = AdvantageCondition.episode_rewards(
                     torch.tensor([length]), torch.tensor([success]), max_steps=length,
                     failure_penalty=float(penalty), normalization=float(scale),
                 )[0]

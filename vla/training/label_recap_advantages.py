@@ -11,7 +11,6 @@ from vla.training.recap_utils import (
 )
 from vla.dataloader.advantage_labels import write_advantage_labels
 from vla.dataloader.recap_dataset import build_episode_store, relative_path
-from vla.model.modules.recap.advantage import compute_advantages
 from vla.model.modules.recap.recap import QwenRecap
 
 
@@ -42,10 +41,7 @@ def label(cfg, store, device, *, overwrite=False):
             critic.predict_value(batch)["values"].float().cpu()
             for batch in store.batches(episode, settings.prediction_batch_size)
         ])
-        advantages = compute_advantages(
-            episode.rewards[None], values[None],
-            mode=settings.mode, n_steps=settings.n_steps,
-        )[0]
+        advantages = critic.advantage(episode.rewards[None], values[None])[0]
         if not torch.isfinite(advantages).all():
             raise FloatingPointError(f"nonfinite advantages in {episode.dataset_name}/{episode.episode_index}")
         results.append((episode, values, advantages))

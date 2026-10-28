@@ -27,8 +27,8 @@ class QwenValueModel(nn.Module):
 
     Each sample is one observation with one or more camera images. Callers should
     only submit valid observations, then scatter predictions into [B, T] for
-    compute_advantages. The critic input must not include advantage labels or
-    future observations/actions.
+    AdvantageCondition.compute_advantages. The critic input must not include
+    advantage labels or future observations/actions.
     """
 
     def __init__(
