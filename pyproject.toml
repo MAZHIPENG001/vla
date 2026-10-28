@@ -13,11 +13,13 @@ dependencies = [
     "einops==0.8.2",
     "huggingface-hub==1.31.0",
     "msgpack>=1.1,<2",
+    "ninja>=1.11",
     "numpy==2.4.6",
     "numpydantic==1.10.0",
     "omegaconf==2.3.1",
     "opencv-python-headless==5.0.0.93",
     "pandas==3.0.6",
+    "packaging>=24",
     "pillow==12.3.0",
     "psutil==7.2.2",
     "pyarrow==26.0.0",
@@ -27,15 +29,14 @@ dependencies = [
     "qwen-vl-utils==0.0.8",
     "rich==15.0.0",
     "safetensors==0.8.0",
-    "torch==2.11.0+cu128",
-    "torchaudio==2.11.0+cu128",
-    "torchvision==0.26.0+cu128",
+    "setuptools==81.0.0",
     "tqdm==4.70.1",
     "transformers==5.17.0",
     "typer==0.27.2",
     "typing-extensions>=4.12,<5",
     "wandb==0.31.0",
     "websockets==17.3",
+    "wheel>=0.45",
 ]
 
 [project.optional-dependencies]
@@ -62,11 +63,11 @@ data_process = ["web/*"]
 required-version = ">=0.11.7"
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 default-groups = []
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
+# PyTorch is installed separately by the user, including its CUDA dependencies.
+exclude-dependencies = ["torch", "torchvision", "torchaudio"]
+# Compile extensions against the torch already installed in this environment.
+# Other project dependencies provide setuptools, wheel, ninja, packaging and numpy.
+no-build-isolation-package = ["pytorch3d", "deepspeed", "flash-attn"]
 
 [[tool.uv.index]]
 name = "pypi"
@@ -74,27 +75,7 @@ url = "https://pypi.org/simple"
 default = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
 pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "978cd99221b9e0a6a568f1d427854d73363265cf" }
-
-# These setup scripts import torch. Build against the project's exact CUDA wheel.
-# Explicit wheel URLs also work in isolated builds, where tool.uv.sources is not
-# inherited: https://github.com/astral-sh/uv/issues/18059
-[tool.uv.extra-build-dependencies]
-pytorch3d = [
-    "torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=c9a7ca4c74fae10a58e6175b4b2cea953f9322bb6562bbf339ad6a05f52190ad",
-    "numpy==2.4.6", "setuptools==81.0.0", "ninja", "packaging",
-]
-deepspeed = [
-    "torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=c9a7ca4c74fae10a58e6175b4b2cea953f9322bb6562bbf339ad6a05f52190ad",
-    "numpy==2.4.6", "setuptools==81.0.0", "ninja", "packaging",
-]
-flash-attn = [
-    "torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=c9a7ca4c74fae10a58e6175b4b2cea953f9322bb6562bbf339ad6a05f52190ad",
-    "setuptools==81.0.0", "ninja", "packaging", "psutil",
-]
 
 # Static metadata from the pinned commit avoids compiling/importing torch at lock time.
 # Update this entry together with the Git revision if PyTorch3D changes.

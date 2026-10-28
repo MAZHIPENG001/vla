@@ -42,8 +42,9 @@ uv run --no-sync python -m data_process view
 ```
 
 完整模型环境的安装方式见[项目 README](../README.md)。完整环境已经包含这些依赖，
-无需再运行上面的轻量同步命令；可直接执行 `uv run --locked python -m data_process view`。
-轻量环境使用 `--no-sync`，避免运行时自动补装模型依赖。
+无需再运行上面的轻量同步命令；可直接执行 `uv run --no-sync python -m data_process view`。
+运行时使用 `--no-sync`，避免自动补装模型依赖。轻量同步命令会清理环境中的其他包；
+如需保留手动安装的 PyTorch 或完整模型环境，给同步命令添加 `--inexact`。
 
 默认地址为 **http://127.0.0.1:8765**，按 `Ctrl+C` 停止。默认数据路径为项目下的
 `playground/Dataset/demo_clean_repo`，可用 `--path` 覆盖。也可在页面顶部输入路径并点击 **打开数据集**，或通过 **选择文件夹** 浏览服务所在机器的目录。
