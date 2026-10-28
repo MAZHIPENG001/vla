@@ -29,4 +29,4 @@ wandb==0.31.0
 websockets==17.3
 deepspeed==0.19.8
 peft==0.21.2
-pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@978cd99221b9e0a6a568f1d427854d73363265cf
+# pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@978cd99221b9e0a6a568f1d427854d73363265cf
