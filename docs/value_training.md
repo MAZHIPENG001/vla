@@ -117,6 +117,17 @@ python -m vla.training.train_recap_value \
 python -m vla.training.train_recap_value \
   --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
 
+TRANSFORMERS_VERBOSITY=error \
+CUDA_VISIBLE_DEVICES=5 uv run --no-sync python \
+  -m vla.training.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml \
+  --device cuda \
+  --set recap.training.max_steps=200 \
+        recap.training.batch_size=32 \
+        recap.training.logging_steps=1 \
+        recap.training.output_dir=playground/Checkpoints/recap_value_smoke \
+        recap.training.save_interval=50
+
 # 两卡 DDP；GPU 选择通过 CUDA_VISIBLE_DEVICES 控制
 CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
   -m vla.training.train_recap_value \

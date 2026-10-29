@@ -66,7 +66,7 @@ recap:
     validation_fraction: 0.1
     eval_interval: 500
     save_interval: 1000
-    logging_steps: 10
+    logging_steps: 1
     gradient_checkpointing: true
     mixed_precision: bf16
     resume_from_checkpoint: null  # Checkpoint directory; restores complete training state.
@@ -121,10 +121,10 @@ datasets:
       source: sidecar  # parquet: read existing label columns; none: legacy/SFT.
       path: meta/advantage_labels.jsonl
 trainer:
-  max_train_steps: 100000
-  num_warmup_steps: 5000
-  save_interval: 5000
-  eval_interval: 100
+  max_train_steps: 100000 # Total number of training steps
+  num_warmup_steps: 5000 # Warmup steps for learning rate scheduler
+  save_interval: 1000 # Save checkpoint every N steps
+  eval_interval: 500 # Evaluate every N steps
   learning_rate:
     base: 2.5e-05
     qwen_vl_interface: 1.0e-05
