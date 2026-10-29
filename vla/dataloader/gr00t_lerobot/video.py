@@ -33,7 +33,7 @@ try:
     import torchcodec
 
     TORCHCODEC_AVAILABLE = True
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, OSError):
     TORCHCODEC_AVAILABLE = False
 
 

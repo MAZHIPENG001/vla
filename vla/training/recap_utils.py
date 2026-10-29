@@ -13,13 +13,27 @@ import torch
 
 from vla.model.modules.recap.recap import QwenRecapDefaultConfig
 
+VALUE_DATA_PROFILE = {
+    "return_frame_info": True, "return_value_targets": True,
+    "sampling_mode": "sequential", "transform_mode": "eval", "delete_pause_frame": False,
+    "advantage_labels": {"source": "none"},
+    "value_target_config": {
+        "data": "${recap.data}", "reward": "${recap.reward}",
+        "value_model": {"value_min": "${recap.value_model.value_min}", "value_max": "${recap.value_model.value_max}"},
+    },
+    "per_device_batch_size": "${recap.training.batch_size}",
+    "num_workers": "${recap.training.num_workers}", "shuffle": True,
+    "pin_memory": False, "save_statistics": False,
+}
+
 PIPELINE_DEFAULTS = {
     "data": {
         "success_source": "manifest", "outcome_path": "meta/recap_episodes.jsonl",
         "success_column": "success", "task_column": "task_index",
         "truncated_column": None, "intervention_column": None,
     },
-    "reward": {"failure_penalty": None, "normalization": None, "task_overrides": {}},
+    "reward": {"source": "episode", "column": "next.reward", "failure_penalty": None,
+               "normalization": None, "task_overrides": {}},
     "training": {
         "output_dir": "playground/Checkpoints/recap_value",
         "batch_size": 2, "num_workers": 0, "max_steps": 10000,
@@ -27,6 +41,7 @@ PIPELINE_DEFAULTS = {
         "max_grad_norm": 1.0, "validation_fraction": 0.1,
         "eval_interval": 500, "save_interval": 1000, "logging_steps": 10,
         "gradient_checkpointing": True,
+        "mixed_precision": "bf16", "resume_from_checkpoint": None,
     },
     "labeling": {"output_dir": "playground/Checkpoints/recap_labels"},
 }
@@ -38,6 +53,7 @@ def parser_for(description):
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--model_id", help="Override only the critic backbone.")
     parser.add_argument("--checkpoint", help="Trained QwenValueModel state_dict; training uses this as a warm start.")
+    parser.add_argument("--resume_from_checkpoint", help="Training checkpoint directory (restores optimizer, RNG and data position).")
     parser.add_argument("--check_data", action="store_true", help="Validate trajectory metadata/returns without loading Qwen.")
     parser.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE", help="OmegaConf overrides on the shared YAML.")
     return parser
@@ -47,12 +63,15 @@ def load_config(args):
     cfg = OmegaConf.merge(
         {"seed": 42, "recap": asdict(QwenRecapDefaultConfig())},
         {"recap": PIPELINE_DEFAULTS},
+        {"datasets": {"vla_data": {"profiles": {"value": VALUE_DATA_PROFILE}}}},
         OmegaConf.load(args.config_yaml), OmegaConf.from_dotlist(args.set),
     )
     if args.model_id:
         cfg.recap.qwenvl.base_vlm = args.model_id
     if args.checkpoint:
         cfg.recap.value_model.checkpoint = args.checkpoint
+    if args.resume_from_checkpoint:
+        cfg.recap.training.resume_from_checkpoint = args.resume_from_checkpoint
     return cfg
 
 
@@ -64,7 +83,17 @@ def seed_everything(seed):
 
 def single_process_only():
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
-        raise ValueError("These entrypoints are single-process; use python -m, not torchrun/accelerate launch.")
+        raise ValueError("Advantage export is single-process; use python -m vla.training.label_recap_advantages.")
+
+
+def synchronize(accelerator):
+    # Accelerate 1.15 passes CUDA device_ids even for CPU/Gloo barriers. With a
+    # CUDA-enabled PyTorch build this can select an invalid GPU on CPU ranks.
+    if accelerator.device.type == "cpu":
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+    else:
+        accelerator.wait_for_everyone()
 
 
 def config_contract(cfg):
@@ -72,6 +101,7 @@ def config_contract(cfg):
     resolved = OmegaConf.to_container(cfg, resolve=True)
     recap = resolved["recap"]
     data = resolved["datasets"]["vla_data"]
+    data = {**data, **data.get("profiles", {}).get("value", {})}
     return {
         "reward": recap["reward"],
         "base_vlm": recap["qwenvl"]["base_vlm"],
@@ -80,6 +110,7 @@ def config_contract(cfg):
             "include_state", "obs_image_size", "CoT_prompt", "action_type", "action_mode", "data_mix",
         )},
         "task_column": recap["data"]["task_column"],
+        "trajectory_data": recap["data"],
     }
 
 
@@ -114,17 +145,36 @@ def validate_checkpoint(cfg, checkpoint):
     return metadata
 
 
-def save_checkpoint(directory, critic, optimizer, step, cfg, split):
+def save_checkpoint(directory, critic, accelerator, step, cfg, split, progress):
+    """Collective save: every rank must participate, including ZeRO-3 gathers."""
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=False)
+    # Publish only complete checkpoints. An interrupted save leaves a hidden
+    # directory and cannot be mistaken for a usable resume checkpoint.
+    temporary = directory.with_name(f".{directory.name}.incomplete")
+    if directory.exists() or temporary.exists():
+        raise FileExistsError(f"checkpoint already exists: {directory} or {temporary}")
+    synchronize(accelerator)
+    if accelerator.is_main_process:
+        temporary.mkdir(parents=True, exist_ok=False)
+    synchronize(accelerator)
+    accelerator.save_state(str(temporary / "training_state"), safe_serialization=False)
+    state = accelerator.get_state_dict(critic)
     checkpoint = directory / "critic.pt"
-    atomic_write(checkpoint, lambda tmp: torch.save(critic.value_model.state_dict(), tmp))
-    # Kept separately from inference weights; --checkpoint is a warm start, not exact resume.
-    atomic_write(directory / "optimizer.pt", lambda tmp: torch.save({"step": step, "optimizer": optimizer.state_dict()}, tmp))
-    write_json(directory / "metadata.json", {"step": step, "contract": config_contract(cfg), "split": split})
-    saved = OmegaConf.create(OmegaConf.to_container(critic.config, resolve=True))
-    saved.recap.value_model.checkpoint = str(checkpoint.resolve())
-    OmegaConf.save(saved, directory / "config.yaml")
+    if accelerator.is_main_process:
+        weights = {key.removeprefix("value_model."): value for key, value in state.items()
+                   if key.startswith("value_model.")}
+        if not weights:
+            raise ValueError("checkpoint contains no value model weights")
+        atomic_write(temporary / "critic.pt", lambda tmp: torch.save(weights, tmp))
+        write_json(temporary / "progress.json", {"step": step, **progress})
+        write_json(temporary / "metadata.json", {"step": step, "contract": config_contract(cfg), "split": split})
+        saved = OmegaConf.create(OmegaConf.to_container(accelerator.unwrap_model(critic).config, resolve=True))
+        saved.recap.value_model.checkpoint = str(checkpoint.resolve())
+        OmegaConf.save(saved, temporary / "config.yaml")
+    synchronize(accelerator)
+    if accelerator.is_main_process:
+        os.replace(temporary, directory)
+    synchronize(accelerator)
     return checkpoint
 
 

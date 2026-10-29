@@ -88,3 +88,6 @@ hf download Qwen/Qwen3-VL-4B-Instruct --local-dir playground/Pretrained_models/Q
 ```bash
 bash examples/LIBERO/train_files/run_libero_train.sh
 ```
+
+Value Model 独立训练、断点续训和 Advantage 标签生成见 [训练指南](docs/value_training.md)。
+默认冻结 Qwen 主干，仅训练 Value Head；支持 bf16、单卡、DDP 和现有 DeepSpeed 配置。

@@ -1,14 +1,11 @@
-"""Complete, chronological LeRobot trajectories for RECAP."""
-from bisect import bisect_right
-from dataclasses import dataclass
+"""Scalar trajectory rewards/returns; observations use the regular VLA Dataset."""
+from dataclasses import dataclass, replace
 import json
 from numbers import Integral
 from pathlib import Path
 
 import numpy as np
-from omegaconf import OmegaConf
 import torch
-from torch.utils.data import Dataset
 
 from vla.model.modules.recap.advantage import AdvantageCondition
 
@@ -48,29 +45,35 @@ class Episode:
 
 
 class RecapEpisodes:
-    """Read every original frame, bypassing mixture sampling/pause filtering.
+    """Validate complete trajectory tables and cache scalar targets only.
 
     Episodes must be complete. The final stored row is the terminal sample,
     matching AdvantageCondition.episode_rewards. Only scalar arrays stay in RAM;
-    images are lazy.
+    This class neither reads observations nor implements a PyTorch Dataset.
     """
-    def __init__(self, datasets, cfg):
+    def __init__(self, datasets, cfg, *, reuse_cached=False):
         self.datasets = list(datasets)
         self.episodes = []
         self.cfg = cfg
-        data_cfg, reward_cfg = cfg.recap.data, cfg.recap.reward
+        data_cfg, reward_cfg = cfg.data, cfg.reward
+        reward_source = reward_cfg.get("source", "episode")
+        if reward_source not in ("episode", "column"):
+            raise ValueError("recap.reward.source must be episode or column")
         names = [ds.dataset_name for ds in self.datasets]
         if len(names) != len(set(names)):
             raise ValueError("dataset names must be unique")
         if data_cfg.success_source not in ("manifest", "column", "all_success"):
             raise ValueError("success_source must be manifest, column or all_success")
         for dataset_index, ds in enumerate(self.datasets):
-            ds.transforms.eval()
+            cached = getattr(ds, "value_targets", None)
+            if reuse_cached and cached is not None:
+                self.episodes.extend(replace(ep, dataset_index=dataset_index) for ep in cached.episodes)
+                continue
             for modality in ("video", "state", "language"):
                 for key in ds.modality_keys.get(modality, []):
                     if (np.asarray(ds.delta_indices[key]) > 0).any():
                         raise ValueError(f"critic observation {key} contains future frames")
-            outcomes = self._outcomes(ds) if data_cfg.success_source == "manifest" else {}
+            outcomes = self._outcomes(ds) if reward_source == "episode" and data_cfg.success_source == "manifest" else {}
             seen = set()
             for trajectory_id, length in zip(ds.trajectory_ids, ds.trajectory_lengths):
                 trajectory_id = index(trajectory_id, "episode_index")
@@ -95,7 +98,9 @@ class RecapEpisodes:
                         raise ValueError(f"missing truncated column: {column}")
                     if any(boolean(v, column) for v in frame[column]):
                         raise ValueError("truncated episodes cannot use terminal Monte Carlo targets")
-                if data_cfg.success_source == "manifest":
+                if reward_source == "column":
+                    success = None  # Existing rewards do not require success metadata.
+                elif data_cfg.success_source == "manifest":
                     if trajectory_id not in outcomes:
                         raise ValueError(f"missing outcome for {ds.dataset_name}/{trajectory_id}")
                     success = outcomes[trajectory_id]
@@ -109,14 +114,24 @@ class RecapEpisodes:
                 overrides = reward_cfg.task_overrides.get(task_key, {})
                 penalty = overrides.get("failure_penalty", reward_cfg.failure_penalty)
                 scale = overrides.get("normalization", reward_cfg.normalization)
-                if penalty is None or scale is None:
-                    raise ValueError(f"set recap.reward.failure_penalty and normalization, or task_overrides[{task_key!r}]")
-                rewards = AdvantageCondition.episode_rewards(
-                    torch.tensor([length]), torch.tensor([success]), max_steps=length,
-                    failure_penalty=float(penalty), normalization=float(scale),
-                )[0]
+                if scale is None or not np.isfinite(float(scale)) or float(scale) <= 0:
+                    raise ValueError(f"set positive recap.reward.normalization or task_overrides[{task_key!r}]")
+                if reward_source == "column":
+                    column = reward_cfg.column
+                    if column not in frame:
+                        raise ValueError(f"missing reward column: {column}")
+                    rewards = torch.as_tensor(frame[column].to_numpy(dtype=np.float32)) / float(scale)
+                else:
+                    if penalty is None:
+                        raise ValueError(f"set recap.reward.failure_penalty or task_overrides[{task_key!r}]")
+                    rewards = AdvantageCondition.episode_rewards(
+                        torch.tensor([length]), torch.tensor([success]), max_steps=length,
+                        failure_penalty=float(penalty), normalization=float(scale),
+                    )[0]
+                if not torch.isfinite(rewards).all():
+                    raise ValueError(f"{task_key}/{trajectory_id}: rewards must be finite")
                 returns = rewards.flip(0).cumsum(0).flip(0)
-                bounds = cfg.recap.value_model
+                bounds = cfg.value_model
                 if ((returns < bounds.value_min) | (returns > bounds.value_max)).any():
                     raise ValueError(f"{task_key}/{trajectory_id}: returns outside value support; adjust fixed task normalization")
                 column = data_cfg.intervention_column
@@ -134,9 +149,11 @@ class RecapEpisodes:
         if not self.episodes:
             raise ValueError("no complete trajectories found")
         self.task_ids = {key: i for i, key in enumerate(sorted({ep.task_key for ep in self.episodes}))}
+        self.by_episode = {(ep.dataset_name, ep.episode_index): ep for ep in self.episodes}
+        self.offsets = np.cumsum([0] + [ep.length for ep in self.episodes]).tolist()
 
     def _outcomes(self, ds):
-        path = ds.dataset_path / relative_path(self.cfg.recap.data.outcome_path)
+        path = ds.dataset_path / relative_path(self.cfg.data.outcome_path)
         outcomes = {}
         with path.open(encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, 1):
@@ -154,19 +171,9 @@ class RecapEpisodes:
                     raise ValueError(f"{path}:{line_number}: {exc}") from exc
         return outcomes
 
-    def example(self, episode, frame_index):
-        ds = self.datasets[episode.dataset_index]
-        if ds.curr_traj_id != episode.episode_index or ds.curr_traj_data is None:
-            ds.curr_traj_data = ds.get_trajectory_data(episode.episode_index)
-            ds.curr_traj_id = episode.episode_index
-        raw = ds.get_step_data(episode.episode_index, frame_index)
-        sample = ds._pack_sample(ds.transforms(raw))
-        # Do not expose future actions, outcomes or advantage labels to the critic.
-        return {key: sample[key] for key in ("image", "lang", "state") if key in sample}
-
-    def batches(self, episode, batch_size):
-        for start in range(0, episode.length, batch_size):
-            yield [self.example(episode, i) for i in range(start, min(start + batch_size, episode.length))]
+    def frame_indices(self, episode_indices):
+        """Indices into the regular mixture in sampling_mode=sequential."""
+        return [frame for i in episode_indices for frame in range(self.offsets[i], self.offsets[i + 1])]
 
     def split(self, validation_fraction, seed):
         if not 0 <= validation_fraction < 1:
@@ -183,35 +190,3 @@ class RecapEpisodes:
             raise ValueError("validation needs two episodes in a task; add data or explicitly set validation_fraction: 0")
         return train, validation
 
-
-class ReturnDataset(Dataset):
-    def __init__(self, store, episode_indices):
-        self.store = store
-        self.episodes = [store.episodes[i] for i in episode_indices]
-        self.ends = np.cumsum([ep.length for ep in self.episodes]).tolist()
-
-    def __len__(self):
-        return self.ends[-1] if self.ends else 0
-
-    def __getitem__(self, i):
-        if not 0 <= i < len(self):
-            raise IndexError(i)
-        position = bisect_right(self.ends, i)
-        frame = i - (self.ends[position - 1] if position else 0)
-        episode = self.episodes[position]
-        return {**self.store.example(episode, frame), "return": float(episode.returns[frame])}
-
-
-def build_episode_store(cfg):
-    # Resolve references while attached to the complete shared config.
-    data = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True)["datasets"]["vla_data"])
-    data.advantage_labels = {"source": "none"}
-    data.delete_pause_frame = False
-    data.load_all_data_for_training = True
-    from vla.dataloader.lerobot_datasets import get_vla_dataset
-    mixture = get_vla_dataset(data, mode="val", seed=cfg.seed)
-    return RecapEpisodes(mixture.datasets, cfg)
-
-
-def collate_examples(batch):
-    return batch

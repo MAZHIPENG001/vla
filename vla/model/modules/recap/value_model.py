@@ -6,13 +6,16 @@ import math
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+from omegaconf import OmegaConf
 
+from vla.model.modules.vlm import get_vlm_model
 
 @dataclass
 class ValueModelOutput:
     logits: Tensor
     values: Tensor
     loss: Tensor | None = None
+    losses: Tensor | None = None
 
 
 class QwenValueModel(nn.Module):
@@ -39,45 +42,36 @@ class QwenValueModel(nn.Module):
         num_bins: int = 201,
         value_min: float = -1.0,
         value_max: float = 0.0,
-        freeze_backbone: bool = False,
+        freeze_backbone: bool = True,
         config=None,
     ) -> None:
         super().__init__()
+        # Import framework helpers only after the trainer selects the CPU/GPU
+        # distributed backend; its logger initializes Accelerate PartialState.
+        from vla.model.framework.share_tools import _to_omegaconf
         if not isinstance(num_bins, int) or isinstance(num_bins, bool) or num_bins < 2:
             raise ValueError("num_bins must be an integer >= 2")
         if not (math.isfinite(value_min) and math.isfinite(value_max) and value_min < value_max):
             raise ValueError("value bounds must be finite and value_min < value_max")
 
-        # Lazy imports keep the standalone advantage helpers usable without a VLM.
-        from omegaconf import OmegaConf
-        from vla.model.modules.vlm import get_vlm_model
-
         # Only recap.qwenvl configures the critic. Qwen's existing factory expects
         # framework.qwenvl, so adapt into a private config without changing the
         # full shared config or accidentally loading the policy backbone.
-        if config is None:
-            backbone_config = OmegaConf.create({
-                "framework": {"qwenvl": {
-                    "base_vlm": model_id,
-                    "attn_implementation": attn_implementation,
-                }},
-                "datasets": {"vla_data": {}},
-            })
-        else:
-            from vla.model.framework.share_tools import _to_omegaconf
 
-            config = _to_omegaconf(getattr(config, "_cfg", config))
-            qwenvl = OmegaConf.select(config, "recap.qwenvl")
-            if qwenvl is None:
-                raise ValueError("value model config requires recap.qwenvl; framework.qwenvl belongs to the policy")
-            # Resolve while nodes still belong to the full config, so references
-            # to shared top-level fields (e.g. a model root) continue to work.
-            datasets = OmegaConf.select(config, "datasets", default=OmegaConf.create({}))
-            backbone_config = OmegaConf.create({
-                "framework": {"qwenvl": OmegaConf.to_container(qwenvl, resolve=True)},
-                "datasets": OmegaConf.to_container(datasets, resolve=True),
-            })
-            backbone_config = OmegaConf.merge({"datasets": {"vla_data": {}}}, backbone_config)
+        config = _to_omegaconf(getattr(config, "_cfg", config))
+        qwenvl = OmegaConf.select(config, "recap.qwenvl")
+        if qwenvl is None:
+            raise ValueError("value model config requires recap.qwenvl; framework.qwenvl belongs to the policy")
+        # Resolve while nodes still belong to the full config, so references
+        # to shared top-level fields (e.g. a model root) continue to work.
+        datasets = OmegaConf.select(config, "datasets", default=OmegaConf.create({}))
+        backbone_config = OmegaConf.create({
+            "framework": {"qwenvl": OmegaConf.to_container(qwenvl, resolve=True)},
+            "datasets": OmegaConf.to_container(datasets, resolve=True),
+        })
+        backbone_config = OmegaConf.merge({"datasets": {"vla_data": {}}}, backbone_config)
+        precision = OmegaConf.select(config, "recap.training.mixed_precision", default="bf16")
+        backbone_config.framework.qwenvl.torch_dtype = "float32" if precision == "no" else "bfloat16"
         self.qwen_vl_interface = get_vlm_model(backbone_config)
         if self.qwen_vl_interface is None:
             raise ValueError("RECAP requires a Qwen VLM backbone")
@@ -89,6 +83,15 @@ class QwenValueModel(nn.Module):
         if freeze_backbone:
             self.qwen_vl_interface.requires_grad_(False)
         self.train(self.training)
+
+    def _apply(self, fn, recurse=True):
+        # DeepSpeed may cast the whole module to bf16, including buffers. Keep
+        # the value support exact so labels and exported checkpoints retain the
+        # configured return scale after such a cast.
+        support = self.bin_values.detach().clone()
+        result = super()._apply(fn, recurse=recurse)
+        self.bin_values = support.to(device=self.bin_values.device, dtype=torch.float32)
+        return result
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -136,8 +139,9 @@ class QwenValueModel(nn.Module):
         pooled = hidden[torch.arange(hidden.shape[0], device=hidden.device), last]
         logits = self.value_head(pooled.to(dtype=self.value_head.weight.dtype)).float()
         values = (logits.softmax(dim=-1) * self.bin_values.float()).sum(dim=-1)
-        loss = F.cross_entropy(logits, targets) if targets is not None else None
-        return ValueModelOutput(logits=logits, values=values, loss=loss)
+        losses = F.cross_entropy(logits, targets, reduction="none") if targets is not None else None
+        loss = losses.mean() if losses is not None else None
+        return ValueModelOutput(logits=logits, values=values, loss=loss, losses=losses)
 
     @torch.no_grad()
     def predict_values(self, images, instructions) -> Tensor:

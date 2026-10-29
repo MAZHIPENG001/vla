@@ -4,21 +4,31 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 import torch
+from torch.utils.data import Subset
 
 from vla.training.recap_utils import (
     atomic_write, describe_store, load_config, parser_for, seed_everything,
     single_process_only, validate_checkpoint, write_json,
 )
 from vla.dataloader.advantage_labels import write_advantage_labels
-from vla.dataloader.recap_dataset import build_episode_store, relative_path
+from vla.dataloader import build_dataloader
+from vla.dataloader.recap_targets import relative_path
 from vla.model.modules.recap.recap import QwenRecap
 
 
 @torch.no_grad()
-def label(cfg, store, device, *, overwrite=False):
+def label(cfg, data_loader, device, *, overwrite=False):
+    dataset = data_loader.dataset
+    store = getattr(dataset, "value_targets", None)
+    if store is None or dataset.sampling_mode != "sequential":
+        raise ValueError("labeling requires return_value_targets: true and sampling_mode: sequential")
     checkpoint = cfg.recap.value_model.checkpoint
     if checkpoint is None:
-        checkpoint = str(Path(cfg.recap.training.output_dir) / "final/critic.pt")
+        root = Path(cfg.recap.training.output_dir)
+        candidates = [path for pattern in ("final*/critic.pt", "step_*/critic.pt")
+                      for path in root.glob(pattern) if (path.parent / "metadata.json").is_file()]
+        checkpoint = str(max(candidates, key=lambda path: json.loads(
+            (path.parent / "metadata.json").read_text())["step"]) if candidates else root / "final/critic.pt")
     provenance = validate_checkpoint(cfg, checkpoint)
     cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
     cfg.recap.value_model.checkpoint = str(Path(checkpoint).resolve())
@@ -39,7 +49,11 @@ def label(cfg, store, device, *, overwrite=False):
         # Bounded image memory: keep only scalar values across the trajectory.
         values = torch.cat([
             critic.predict_value(batch)["values"].float().cpu()
-            for batch in store.batches(episode, settings.prediction_batch_size)
+            for batch in build_dataloader(
+                cfg, cfg.datasets.vla_data.get("dataset_py", "lerobot_datasets"),
+                dataset=Subset(dataset, store.frame_indices([i])), profile="value", mode="val",
+                batch_size=settings.prediction_batch_size,
+            )
         ])
         advantages = critic.advantage(episode.rewards[None], values[None])[0]
         if not torch.isfinite(advantages).all():
@@ -63,6 +77,7 @@ def label(cfg, store, device, *, overwrite=False):
                     "dataset_name": ep.dataset_name, "episode_index": ep.episode_index,
                     "frame_index": frame, "task_key": ep.task_key,
                     "value": float(values[frame]), "return": float(ep.returns[frame]),
+                    "reward": float(ep.rewards[frame]),
                     "advantage": float(scores[frame]), "advantage_indicator": bool(labels[frame]),
                     "is_intervention": bool(ep.interventions[frame]),
                 }, ensure_ascii=False) + "\n")
@@ -103,10 +118,10 @@ def main(argv=None):
     single_process_only()
     cfg = load_config(args)
     seed_everything(cfg.seed)
-    store = build_episode_store(cfg)
-    describe_store(store)
+    loader = build_dataloader(cfg, cfg.datasets.vla_data.get("dataset_py", "lerobot_datasets"), profile="value")
+    describe_store(loader.dataset.value_targets)
     if not args.check_data:
-        label(cfg, store, args.device, overwrite=args.overwrite_labels)
+        label(cfg, loader, args.device, overwrite=args.overwrite_labels)
 
 
 if __name__ == "__main__":

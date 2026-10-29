@@ -8,10 +8,6 @@ from omegaconf import OmegaConf
 from torch import Tensor, nn
 
 from deployment.model_server.tools.image_tools import to_pil_preserve
-from vla.model.framework.share_tools import (
-    _to_omegaconf,
-    add_discretized_state_to_instruction,
-)
 from vla.model.modules.recap.advantage import AdvantageModule
 from vla.model.modules.recap.value_model import QwenValueModel
 
@@ -28,7 +24,7 @@ class QwenRecapDefaultConfig:
         "num_bins": 201,
         "value_min": -1.0,
         "value_max": 0.0,
-        "freeze_backbone": False,  # False: train both Qwen and the value head.
+        "freeze_backbone": True,  # Default: train only the value head.
         "checkpoint": None,  # Optional QwenValueModel.state_dict(), including the head.
     })
     advantage: dict = field(default_factory=lambda: {
@@ -52,6 +48,7 @@ class QwenRecap(nn.Module):
 
     def __init__(self, config=None):
         super().__init__()
+        from vla.model.framework.share_tools import _to_omegaconf
         if isinstance(config, Path):
             config = str(config)
         # Work on a copy of the full config, preserving cross-section interpolations
@@ -102,6 +99,7 @@ class QwenRecap(nn.Module):
         return self.value_model.qwen_vl_interface
 
     def _prepare_examples(self, examples):
+        from vla.model.framework.share_tools import add_discretized_state_to_instruction
         if isinstance(examples, dict):
             examples = [examples]
         if not examples:
@@ -135,7 +133,10 @@ class QwenRecap(nn.Module):
             dtype=torch.float32, device=self.value_model.bin_values.device,
         )
         output = self.value_model(images, instructions, returns=targets)
-        return {"value_loss": output.loss}
+        # Per-observation losses allow distributed validation to discard padded
+        # duplicate samples before averaging, including an uneven final batch.
+        return {"value_loss": output.loss, "value_losses": output.losses,
+                "values": output.values, "returns": targets}
 
     @torch.no_grad()
     def predict_value(self, examples: list[dict]) -> dict[str, Tensor]:

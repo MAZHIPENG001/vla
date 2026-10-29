@@ -29,6 +29,7 @@ import io
 import json, torch
 import copy
 from collections import defaultdict
+from bisect import bisect_right
 from pathlib import Path
 from typing import Sequence
 import os, random
@@ -648,6 +649,13 @@ class LeRobotSingleDataset(Dataset):
 
         # Check if the dataset is valid
         self._check_integrity()
+        if self.data_cfg.get("transform_mode", "train") == "eval":
+            self.transforms.eval()
+        self.value_targets = None
+        if self.data_cfg.get("return_value_targets", False):
+            from vla.dataloader.recap_targets import RecapEpisodes
+
+            self.value_targets = RecapEpisodes([self], self.data_cfg.value_target_config)
 
     @property
     def dataset_path(self) -> Path:
@@ -981,6 +989,13 @@ class LeRobotSingleDataset(Dataset):
         Returns:
             list[tuple[str, int]]: A list of (trajectory_id, base_index) tuples.
         """
+        if self.data_cfg.get("sampling_mode", "random") == "sequential":
+            if self.delete_pause_frame:
+                raise ValueError("sequential sampling requires delete_pause_frame: false")
+            # Complete frame enumeration must not reuse a filtered policy cache.
+            return [(int(ep), frame) for ep, length in zip(self.trajectory_ids, self.trajectory_lengths)
+                    for frame in range(int(length))]
+
         def is_main():
             return (not dist.is_initialized()) or dist.get_rank() == 0
     
@@ -1376,9 +1391,25 @@ class LeRobotSingleDataset(Dataset):
             dict: The data for the step.
         """
         trajectory_id, base_index = self.all_steps[index]
+        return self.get_sample(trajectory_id, base_index)
+
+    def get_sample(self, trajectory_id: int, base_index: int) -> dict:
+        """The shared sample path for direct and mixture Dataset access."""
         raw_data = self.get_step_data(trajectory_id, base_index)
         data = self.transforms(raw_data)
-        return self._attach_advantage_label(self._pack_sample(data), trajectory_id, base_index)
+        sample = self._attach_advantage_label(self._pack_sample(data), trajectory_id, base_index)
+        if self.data_cfg.get("return_frame_info", False):
+            sample.update({
+                "dataset_name": self.dataset_name, "episode_index": int(trajectory_id),
+                "frame_index": int(base_index),
+                "episode_length": int(self.trajectory_lengths[self.get_trajectory_index(trajectory_id)]),
+            })
+        if self.data_cfg.get("return_value_targets", False):
+            episode = self.value_targets.by_episode[(self.dataset_name, int(trajectory_id))]
+            sample.update({"reward": float(episode.rewards[base_index]),
+                           "return": float(episode.returns[base_index]), "task_key": episode.task_key,
+                           "is_intervention": bool(episode.interventions[base_index])})
+        return sample
 
     def _attach_advantage_label(self, sample, trajectory_id, base_index):
         """Attach labels after transforms using the original observation anchor."""
@@ -2216,11 +2247,20 @@ class LeRobotMixtureDataset(Dataset):
         self.seed = seed
         self.mode = mode
         self.data_cfg = kwargs["data_cfg"] if "data_cfg" in kwargs else None
+        self.sampling_mode = self.data_cfg.get("sampling_mode", "random") if self.data_cfg is not None else "random"
+        if self.sampling_mode not in ("random", "sequential"):
+            raise ValueError("sampling_mode must be random or sequential")
+        self.value_targets = None
+        if self.data_cfg is not None and self.data_cfg.get("return_value_targets", False):
+            from vla.dataloader.recap_targets import RecapEpisodes
+
+            self.value_targets = RecapEpisodes(self.datasets, self.data_cfg.value_target_config, reuse_cached=True)
 
         # Set properties for sampling
 
         # 1. Dataset lengths
         self._dataset_lengths = np.array([len(dataset) for dataset in self.datasets])
+        self._dataset_ends = np.cumsum(self._dataset_lengths).tolist()
         print(f"Dataset lengths: {self._dataset_lengths}")
         self._getitem_count = 0
         # 2. Dataset sampling weights
@@ -2329,6 +2369,14 @@ class LeRobotMixtureDataset(Dataset):
 
     def sample_step(self, index: int) -> tuple[LeRobotSingleDataset, int, int]:
         """Sample a single step from the dataset."""
+        if self.sampling_mode == "sequential":
+            if not 0 <= index < self._dataset_ends[-1]:
+                raise IndexError(index)
+            position = bisect_right(self._dataset_ends, index)
+            dataset = self.datasets[position]
+            local_index = index - (self._dataset_ends[position - 1] if position else 0)
+            trajectory_id, frame = dataset.all_steps[local_index]
+            return dataset, trajectory_id, frame
         # return self.sampled_steps[index]
 
         # Set seed
@@ -2360,6 +2408,12 @@ class LeRobotMixtureDataset(Dataset):
         Returns:
             dict: The data for the trajectory and start index.
         """
+        if self.sampling_mode == "sequential":
+            # Never replace a failed observation with a random frame during
+            # value training or labeling: its episode/frame identity matters.
+            dataset, trajectory_id, step = self.sample_step(index)
+            return dataset.get_sample(trajectory_id, step)
+
         self._getitem_count += 1
         if self._getitem_count % 1000 == 0:
             gc.collect()
@@ -2392,12 +2446,7 @@ class LeRobotMixtureDataset(Dataset):
                         break
                     index = random.randint(0, len(self) - 1)
                     
-                raw_data = dataset.get_step_data(trajectory_id, step)    
-                data = dataset.transforms(raw_data)
-                sample = dataset._pack_sample(data)
-                sample = dataset._attach_advantage_label(sample, trajectory_id, step)
-                
-                return sample
+                return dataset.get_sample(trajectory_id, step)
                 
             except AdvantageLabelError:
                 # A missing/corrupt label must not silently bias the training set
@@ -2425,6 +2474,8 @@ class LeRobotMixtureDataset(Dataset):
         Returns:
             int: The length of a single epoch in the mixture.
         """
+        if self.sampling_mode == "sequential":
+            return self._dataset_ends[-1]
         # Check for potential issues
         if len(self.datasets) == 0:
             return 0

@@ -34,9 +34,10 @@ class _QWen_VL_Interface(nn.Module):
         super().__init__()
 
         qwenvl_config = config.framework.get("qwenvl", {})
-        model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen3.5-VL-4B-Instruct")
+        model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen3-VL-4B-Instruct")
         print(f"\33[92mmodel_id = {model_id}\33[0m")
         attn_implementation = qwenvl_config.get("attn_implementation", "sdpa")
+        model_dtype = getattr(torch, qwenvl_config.get("torch_dtype", "bfloat16"))
         if attn_implementation == "flash_attention_2":
             try:
                 import flash_attn  # noqa: F401
@@ -48,7 +49,7 @@ class _QWen_VL_Interface(nn.Module):
 
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=model_dtype,
             attn_implementation=attn_implementation,
             # device_map="auto",
         )
@@ -78,7 +79,8 @@ class _QWen_VL_Interface(nn.Module):
         kwargs.setdefault("use_cache", False)
         kwargs.setdefault("return_dict", True)
         with torch.autocast(
-            "cuda", dtype=torch.bfloat16, enabled=self.model.device.type == "cuda"
+            "cuda", dtype=torch.bfloat16,
+            enabled=self.model.device.type == "cuda" and self.model.dtype == torch.bfloat16,
         ):
             return self.model.model(**kwargs)
 

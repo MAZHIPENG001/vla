@@ -26,7 +26,7 @@ RECAP 在内部生成一份适配 Qwen 工厂的局部配置，不改写调用�
 | `recap.qwenvl.attn_implementation` | `sdpa` | 注意力实现 |
 | `recap.value_model.num_bins` | `201` | 价值分类档数 |
 | `recap.value_model.value_min/value_max` | `-1/0` | 归一化价值范围 |
-| `recap.value_model.freeze_backbone` | `false` | 是否仅训练价值头 |
+| `recap.value_model.freeze_backbone` | `true` | 是否仅训练价值头 |
 | `recap.value_model.checkpoint` | `null` | 训练好的价值模型 state_dict 路径 |
 | `recap.advantage.mode` | `posttrain` | 优势估计公式 |
 | `recap.advantage.n_steps` | `50` | 后训练前瞻步数 |
@@ -140,7 +140,8 @@ HF_HUB_OFFLINE=1 uv run vla/model/modules/recap/recap.py \
 
 CPU 测试冻结骨干并对价值头反向传播；小规模 Qwen 单元测试另外覆盖骨干梯度。
 省略 `--config_yaml` 时，入口默认加载上述 LIBERO 任务配置。
-如需在 GPU 验证完整反向传播，改用 `--device cuda --backward`，去掉 `--freeze_backbone`。
+如需在 GPU 验证完整反向传播，在 YAML 中设置 `recap.value_model.freeze_backbone: false`，
+再使用 `--device cuda --backward`。
 `--checkpoint /path/to/critic.pt` 可测试加载训练后的价值模型。
 不传 `--model_id` 时使用 YAML 指定的 Hub ID；加载远程模型时不要设置 `HF_HUB_OFFLINE=1`。
 测试使用合成图片和标签，只验证代码链路，不代表新价值头已经学会任务价值。
@@ -154,7 +155,7 @@ CPU 测试冻结骨干并对价值头反向传播；小规模 Qwen 单元测试�
 特征接口跳过词表 logits 的计算，默认关闭 KV cache。
 
 **新建价值头是随机初始化的，必须先用任务轨迹回报训练，才能用于可靠的优势标注。**
-默认联合训练 Qwen 和价值头；`freeze_backbone=True` 可仅训练价值头。
+默认冻结 Qwen 主干、仅训练价值头；将 `recap.value_model.freeze_backbone` 设为 `false` 可联合训练。
 价值监督始终是归一化的剩余回报 `R_t = Σ_{k=t}^{L-1}r_k`，与优势模式中的
 `pretrain` / `return_to_go` 选择无关。将连续回报量化到最近 bin 后计算交叉熵。
 超出价值范围的标签会报错，需检查任务归一化或显式设置 `value_min` / `value_max`。
@@ -484,7 +485,8 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s vla/model/mo
 
 - `python -m vla.training.train_recap_value`：完整轨迹 → 剩余回报 → 价值训练／验证 → checkpoint。
 - `python -m vla.training.label_recap_advantages`：训练好的 checkpoint → 连续优势 → 任务阈值 → 数据集标签。
-- 公共数据适配在 `vla/dataloader/recap_dataset.py`，CLI 和 checkpoint 工具在 `vla/training/recap_utils.py`。
+- 数据加载共用 `vla/dataloader/build_dataloader` 和原有 LeRobot Dataset；
+  `vla/dataloader/recap_targets.py` 只计算标量 Reward/Return，CLI 和 checkpoint 工具在 `vla/training/recap_utils.py`。
 
 当前数据适配器支持仓库已注册的 LeRobot 数据集，通过
 `datasets.vla_data.data_root_dir` 和 `data_mix` 选择数据，通过 `recap.data`
@@ -492,9 +494,9 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s vla/model/mo
 其他数据格式仍需实现完整轨迹读取适配，不能仅靠更换 YAML 自动支持；
 这里提供的是离线轨迹训练流程，不包含各仿真环境的在线交互与采集逻辑。
 
-两个入口仅支持单进程 CPU／单 GPU；请直接用 `python -m`，不要用 torchrun。
-策略网络不参与价值训练，也不会占用这一步的显存。完整 2B 主干训练仍需足够显存；
-`recap.value_model.freeze_backbone: true` 可只训练价值头。
+训练入口复用 Accelerate，支持 CPU、单 GPU、torchrun DDP 和项目现有的 DeepSpeed 配置。
+默认 bf16，默认冻结 Qwen 主干、仅训练价值头；策略网络不参与这一步。
+标签导出使用单进程。完整命令与续训说明见 [训练指南](../../../../docs/value_training.md)。
 
 ### 1. 准备轨迹结果和奖励配置
 
@@ -524,7 +526,10 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s vla/model/mo
 内部任务键为 `数据集名称:任务ID`，避免不同数据集的局部 task_index 冲突。
 frame_index 必须从 0 连续递增；脚本按原始轨迹读取所有帧，不使用策略的随机混合采样或删帧结果。
 图像／状态／文本复用原有加载与归一化，变换置为 eval；带未来观测的窗口会被拒绝。
-主干只接收图像、语言和可选状态，不接收动作、成功标志或未来回报。
+原 Dataset 保留 VLA 的 action 等字段，并按配置附加帧信息和回报；
+价值模型只将图像、语言和可选状态编码为输入，动作、成功标志和未来回报不进入主干。
+`return_frame_info`、`return_value_targets`、`sampling_mode` 由配置控制，
+普通 VLA 的默认字段与随机采样保持原样；Value 入口选择 `profiles.value` 配置。
 
 共享 YAML 的两个奖励参数必须先填写：
 
@@ -535,6 +540,10 @@ recap:
     normalization: 1000   # 仅当全部回报都落在 [-1, 0] 时才适用
     task_overrides: {}
 ```
+
+也可设置 `recap.reward.source: column` 和 `recap.reward.column: next.reward`，
+读取已有逐帧奖励（与当前 observation 对齐）。此模式无需成功清单或 failure_penalty，
+仍要求完整轨迹、固定 normalization 和匹配的价值支持范围。
 
 所有奖励先除以 normalization，然后从轨迹尾部累计得到每帧 return。
 对长度 L 的失败轨迹，初始回报是 `-(L - 1 + failure_penalty) / normalization`。
@@ -569,19 +578,23 @@ learning_rate、validation_fraction、eval_interval、save_interval 等。
 
 ```text
 playground/Checkpoints/recap_value/
+  config.yaml                  # 完整训练配置
   split.json
-  metrics.jsonl                 # 训练 CE、梯度范数、验证 CE 和价值 MAE
+  metrics.jsonl                 # 训练/验证 CE、MAE、MSE、预测 Value 均值与真实 Return 均值
   step_0001000/...              # 周期保存
   final/
     critic.pt                  # QwenValueModel.state_dict，含主干、价值头、bins
-    optimizer.pt               # 优化器状态和 step，单独保存
+    training_state/            # Accelerate 模型、优化器、每 rank RNG 和采样器状态
+    progress.json              # 优化器 step、epoch、已消费 batch 数、恢复约定
     metadata.json              # 奖励尺度、输入约定和训练划分
     config.yaml                # 完整共享配置，checkpoint 指向此 critic.pt
 ```
 
-输出目录已存在时拒绝覆盖，请给新训练指定新目录。
-`--checkpoint` 是从已有 critic 权重继续学习的 warm start，会创建新优化器和新步数；
-当前入口不提供精确断点续训。optimizer.pt 留存供后续恢复工具使用。
+新训练的输出目录已存在时拒绝覆盖。`--checkpoint` 只加载权重，是新优化器和新步数的热启动。
+`--resume_from_checkpoint /path/to/step_0001000` 则恢复完整训练状态和数据位置，
+可在相同运行目录或新目录继续。恢复要求相同数据、划分、随机种子、训练超参数和 world size；
+`max_steps` 是目标总更新次数，可增加。已有 final 会保留，新终态保存为 final_step_XXXXXXX。
+checkpoint 先写隐藏临时目录，全部 rank 保存完成后再原子发布。
 
 ### 3. 导出优势和策略标签
 
@@ -590,7 +603,7 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.label_recap_advantag
   --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
 ```
 
-未指定 checkpoint 时自动读取 `recap.training.output_dir/final/critic.pt`；
+未指定 checkpoint 时自动选择 `recap.training.output_dir` 中步数最大的完整 checkpoint；
 也可用 `--checkpoint /path/to/critic.pt` 选择中间 checkpoint。
 必须同时保留同目录下的 metadata.json，标注前会检查训练步数和奖励／输入约定。
 单独下载的 Instruct 权重不能作为已训练的 critic 标注数据。
@@ -603,7 +616,7 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.label_recap_advantag
 默认 `meta/advantage_labels.jsonl`，可直接被现有策略加载器读取。
 `recap.labeling.output_dir` 默认 `playground/Checkpoints/recap_labels`，保存：
 
-- `scores.jsonl`：dataset_name、episode_index、frame_index、task_key、value、return、advantage、标签及接管标记。
+- `scores.jsonl`：dataset_name、episode_index、frame_index、task_key、reward、value、return、advantage、标签及接管标记。
 - `metadata.json`：checkpoint、优化器步数、任务 ID 映射、阈值、实际正样本比例和标签路径。
 - `config.yaml`：保留 framework 的完整共享配置，并记录 critic 路径和标定阈值。
 
@@ -617,11 +630,11 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.label_recap_advantag
 
 ### 验证范围
 
-`test_recap_pipeline.py` 使用小型真实 Qwen3-VL 训练并更新参数，重新加载保存权重，
-计算优势、标定阈值、导出标签，再通过 AdvantageLabelSource 读取，验证数值与索引。
-还覆盖缺失／重复结果、截断轨迹、帧不连续、未来观测、奖励尺度不匹配和只检查数据的入口。
-测试的轨迹表与视频读取使用临时夹具，不代表真实 LeRobot Parquet／视频已经验证，
-也不代表 2B critic 已完成任务训练。
+`test_value_pipeline.py` 使用真实 Parquet 轨迹表与小型编码器夹具，运行实际价值头、
+Accelerate 训练和 checkpoint 代码，验证变长回报、冻结主干、梯度累积、跨 epoch 精确续训、
+已有奖励列读取、标签导出及 sidecar 读回。`distributed_value_smoke.py` 验证双进程保存／恢复，
+并将分布式验证结果与逐样本计算对比，检查补齐重复样本的排除。
+这些测试不代表真实 Qwen 多 GPU／DeepSpeed 或真实视频解码已完成验证。
 
 ```bash
 NO_ALBUMENTATIONS_UPDATE=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover \
