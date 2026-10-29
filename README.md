@@ -64,6 +64,8 @@ hf download IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot --repo-type dat
 hf download IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot  --repo-type dataset --local-dir "$DATA_ROOT"/libero_object_no_noops_1.0.0_lerobot
 hf download IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot    --repo-type dataset --local-dir "$DATA_ROOT"/libero_goal_no_noops_1.0.0_lerobot
 hf download IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot      --repo-type dataset --local-dir "$DATA_ROOT"/libero_10_no_noops_1.0.0_lerobot
+# or
+modelscope download --dataset MaZp001/vla_data --local_dir "$DATA_ROOT"
 
 # Copy modality.json to each subset
 for d in "$DATA_ROOT"/*/; do

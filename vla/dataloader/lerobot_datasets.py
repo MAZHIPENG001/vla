@@ -140,6 +140,8 @@ if __name__ == "__main__":
     if args.data_root_dir is not None:
         vla_dataset_cfg.data_root_dir = Path(args.data_root_dir)
 
+    print(f"\33[92mvla_dataset_cfg.data_root_dir:{vla_dataset_cfg.data_root_dir}\33[0m")
+    print(f"\33[92mUsing dataset config:{vla_dataset_cfg}\33[0m")
     dataset = get_vla_dataset(data_cfg=vla_dataset_cfg)
     from torch.utils.data import DataLoader
     train_dataloader = DataLoader(

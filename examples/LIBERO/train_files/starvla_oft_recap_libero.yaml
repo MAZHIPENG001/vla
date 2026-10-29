@@ -42,7 +42,7 @@ recap:
     thresholds: {}
   # Explicit outcomes; unknown or truncated episodes must not be treated as successes.
   data:
-    success_source: manifest  # manifest | column | all_success (known successful demos only)
+    success_source: all_success  # manifest | column | all_success (known successful demos only)
     outcome_path: meta/recap_episodes.jsonl
     success_column: success
     task_column: task_index
@@ -51,12 +51,12 @@ recap:
   reward:
     source: episode  # episode: construct from outcome; column: read existing per-frame rewards.
     column: next.reward  # Used only with source: column; rewards align with the current frame.
-    failure_penalty: null  # REQUIRED: choose the task's failure cost; no universal paper value.
-    normalization: null  # REQUIRED: fixed task divisor keeping all returns in [-1, 0].
+    failure_penalty: 500  # REQUIRED: choose the task's failure cost; no universal paper value.
+    normalization: 999  # REQUIRED: fixed task divisor keeping all returns in [-1, 0].
     task_overrides: {}  # "dataset_name:task_id": {failure_penalty: ..., normalization: ...}
   training:
-    output_dir: playground/Checkpoints/recap_value
-    batch_size: 2
+    output_dir: playground/checkpoints/recap_value
+    batch_size: 16
     num_workers: 0
     max_steps: 10000
     gradient_accumulation_steps: 4
@@ -110,7 +110,7 @@ datasets:
         save_statistics: false
     dataset_py: lerobot_datasets
     data_root_dir: playground/Datasets/LEROBOT_LIBERO_DATA
-    data_mix: libero_all
+    data_mix: libero_object
     action_type: delta_qpos
     sequential_step_sampling: false
     per_device_batch_size: 16
