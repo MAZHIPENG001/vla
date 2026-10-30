@@ -171,12 +171,12 @@ def eval_libero(args: Args) -> None:
                     "state": observation["observation.state"].astype(np.float16),  # (1, 8)
                 }
 
-                start_time = time.time()
+                # start_time = time.time()
 
                 response = client_model.step(example=example_dict, step=step)
 
-                end_time = time.time()
-                print(f"time: {end_time - start_time}")
+                # end_time = time.time()
+                # print(f"time: {end_time - start_time}")
 
                 # #
                 raw_action = response["raw_action"]
