@@ -299,10 +299,9 @@ print(condition.to_text())           # 展平为 8 个字符串，丢弃或 padd
 .venv/bin/python -m unittest discover -s vla/model/modules/recap/tests -v
 ```
 
-当前 `test_advantage_module.py` 覆盖三种模式的手算公式、终止失败奖励、padding、
-半精度输入的 float32 累计和梯度隔离，以及任务分位数、严格阈值、人工纠正和条件 dropout。
-组件测试使用价值模型替身，验证按批预测、变长轨迹回填、父模块 train/eval 状态传播
-和阈值配置的 YAML 保存/恢复，无需下载或加载 Qwen 权重。
+当前 `test_online_policy.py` 使用小型编码器替代 Qwen，验证在线优势的 bootstrap、
+终止窗口、人工纠正和条件 dropout，检查策略优化不更新 critic、独立价值训练仍可反传，
+以及旧联合训练配置在加载策略前报错。测试无需下载或加载 Qwen 权重。
 
 ## Advantage 条件策略：QwenOFTRecap
 
@@ -310,7 +309,8 @@ print(condition.to_text())           # 展平为 8 个字符串，丢弃或 padd
 `QwenOFTRecap`，继承原 `QwenOFT` 的动作查询、MLP 动作头、L1 loss 和预测接口。
 任务配置位于 `examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`：
 `framework` 配置策略，`recap` 配置独立价值模型，仍共用一份任务 YAML。
-开启优势条件后，策略在每个训练 batch 中使用 critic 即时计算条件，并按配置冻结或训练 critic。
+开启优势条件后，策略在每个训练 batch 中使用已训练且冻结的 critic 即时计算条件，
+只优化条件化的动作损失。critic 通过 `train_recap_value` 独立训练。
 关闭优势条件则进行普通 OFT 训练。详见
 [VLA 在线计算与冻结选项](../../../../docs/value_training.md#vla-在线计算与冻结选项)。
 
@@ -343,19 +343,21 @@ unconditional = policy.predict_action(observations, advantage="unconditional")["
 ```
 
 在线逻辑直接集成在 `QwenRecap` 内：策略创建 `QwenRecap(config, online=True)`，
-调用 `recap(examples, online=True)` 获取 `condition`、`advantages` 和可选的 `value_loss`。
-普通 `recap(examples)` 仍执行价值监督训练，`predict_value` 仍返回预测价值。
+调用 `recap(examples, online=True)` 获取 `condition`、`advantages`，不返回 `value_loss`。
+独立 critic 的普通 `recap(examples)` 仍执行价值监督训练，`predict_value` 仍返回预测价值。
+策略返回 `loss = action_loss`；优势通过条件文本影响动作预测，不作为额外损失或样本权重。
 
 `framework.advantage_conditioning` 包含：
 
 - `enabled: true`：在线计算优势；设为 false 时不添加条件、不加载 critic。
-- `freeze_critic: true`：冻结整个 critic；false 时增加 MC value loss。
-- `value_loss_weight: 1.0`：解除冻结时总损失中 value loss 的权重。
+- `freeze_critic: true`：策略训练时必须冻结整个 critic，并保持 critic 为 eval 模式。
 - `dropout_probability: 0.3`：训练时以 30% 概率删去条件文本。
 - `inference_condition: positive`：部署默认正优势，可选 negative/unconditional。
 
 训练不读取预存正负标签，不接受调用方传入 `advantage_condition` 或固定 `advantage`。
 旧配置中的 `source` 和 `sft_positive` 已移除，需要删除。
+旧配置还需删除 `value_loss_weight` 和 `trainer.learning_rate.online_advantage`；
+不再支持 `freeze_critic: false` 的联合训练。
 人工接管与 dropout 均由在线模块处理一次；评估模式关闭 dropout。
 
 真实权重测试（先在 YAML 中配置校准后的 task_thresholds；部署策略尺寸由 framework 独立指定）：
@@ -539,11 +541,10 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.label_recap_advantag
 
 ### 验证范围
 
-`test_value_pipeline.py` 使用真实 Parquet 轨迹表与小型编码器夹具，运行实际价值头、
-Accelerate 训练和 checkpoint 代码，验证变长回报、冻结主干、梯度累积、跨 epoch 精确续训、
-已有奖励列读取及校准导出。`test_online_policy.py` 覆盖在线动作训练、冻结梯度和旧标签不参与训练。`distributed_value_smoke.py` 验证双进程保存／恢复，
-并将分布式验证结果与逐样本计算对比，检查补齐重复样本的排除。
-这些测试不代表真实 Qwen 多 GPU／DeepSpeed 或真实视频解码已完成验证。
+`test_online_policy.py` 在 CPU 上运行实际价值头、MC return 分类损失、critic checkpoint
+加载和在线优势逻辑；策略父类使用小型条件回归替身，验证 loss 与动作损失一致，
+动作参数可更新而 critic 参数保持不变。
+这些测试不代表真实 Qwen、多 GPU／DeepSpeed 或真实视频解码已完成验证。
 
 ```bash
 NO_ALBUMENTATIONS_UPDATE=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover \

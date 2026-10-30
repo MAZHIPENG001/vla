@@ -22,7 +22,6 @@ class QwenOFTRecapDefaultConfig(QwenOFTDefaultConfig):
     advantage_conditioning: dict = field(default_factory=lambda: {
         "enabled": True,
         "freeze_critic": True,
-        "value_loss_weight": 1.0,
         "dropout_probability": 0.3,
         "inference_condition": "positive",
     })
@@ -33,6 +32,8 @@ class Qwenvl_OFT_Recap(Qwenvl_OFT):
     """Train OFT with positive/negative/unconditional action contexts.
 
     When enabled, compute conditions online from sampled trajectory targets.
+    The pretrained critic stays frozen; only the conditioned action loss trains
+    the policy. Train the critic separately with train_recap_value.
     File labels and caller-supplied training conditions are not supported.
     Disable conditioning for ordinary OFT training without a critic.
     Deployment uses a fixed condition without executing the critic.
@@ -50,6 +51,10 @@ class Qwenvl_OFT_Recap(Qwenvl_OFT):
         for obsolete in ("source", "sft_positive"):
             if obsolete in cfg:
                 raise ValueError(f"remove advantage_conditioning.{obsolete}; enabled advantage conditioning is online only")
+        if "value_loss_weight" in cfg:
+            raise ValueError("remove advantage_conditioning.value_loss_weight; train the critic separately with train_recap_value")
+        if cfg.enabled and not cfg.freeze_critic:
+            raise ValueError("advantage conditioning requires freeze_critic=true; train the critic separately with train_recap_value")
         if not 0 <= cfg.dropout_probability <= 1:
             raise ValueError("advantage_conditioning.dropout_probability must lie in [0, 1]")
         if cfg.inference_condition not in ("positive", "negative", "unconditional"):
@@ -68,12 +73,9 @@ class Qwenvl_OFT_Recap(Qwenvl_OFT):
             online = self.online_advantage(examples, online=True, generator=kwargs.get("generator"))
             kwargs["advantage_condition"] = online["condition"]
         output = super().forward(examples, **kwargs)
+        output["loss"] = output["action_loss"]
         if online is not None:
             output["advantage_mean"] = online["advantages"].mean()
-            if "value_loss" in online:
-                output["value_loss"] = online["value_loss"]
-                weight = self.config.framework.advantage_conditioning.value_loss_weight
-                output["loss"] = output["action_loss"] + weight * online["value_loss"]
         return output
 
     def _condition_texts(self, examples, *, inference, advantage_condition=None, advantage=None):

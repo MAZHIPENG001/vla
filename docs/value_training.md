@@ -118,7 +118,7 @@ python -m vla.training.train_recap_value \
 # 单卡
 python -m vla.training.train_recap_value \
   --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
-
+# 测试
 TRANSFORMERS_VERBOSITY=error \
 CUDA_VISIBLE_DEVICES=5 uv run --no-sync python \
   -m vla.training.train_recap_value \
@@ -209,8 +209,10 @@ python -m vla.training.label_recap_advantages \
 策略为 `QwenOFTRecap` 时，开启优势条件后只支持训练时在线计算：
 
 价值预测、在线优势和条件文本生成统一由 `vla/model/modules/recap/recap.py`
-中的 `QwenRecap` 完成。策略使用 `QwenRecap(config, online=True)`，通过
-`recap(examples, online=True)` 计算在线条件；普通 `recap(examples)` 仍用于价值监督训练。
+中的 `QwenRecap` 完成。按论文 Algorithm 1 的分阶段流程，先独立训练 critic，
+再冻结 critic 训练优势条件策略。策略使用 `QwenRecap(config, online=True)`，通过
+`recap(examples, online=True)` 计算在线条件；独立 critic 的普通 `recap(examples)`
+仍用于价值监督训练。
 
 | 配置 | VLA 训练行为 |
 | --- | --- |
@@ -225,7 +227,6 @@ framework:
   advantage_conditioning:
     enabled: true
     freeze_critic: true
-    value_loss_weight: 1.0
     dropout_probability: 0.3
     inference_condition: positive
 recap:
@@ -262,21 +263,20 @@ return_to_go: A_t = sum(r[t:episode_length]) - V(o[t])
 这里的“在线”指训练时即时重算已有轨迹的优势，不包含环境交互采集。
 仍需配置 `recap.data/reward`，确保轨迹完整、奖励归一化与 critic 训练一致。
 
-冻结行为分两层：
+策略训练要求 `freeze_critic: true`：整个 critic 冻结并保持 eval，
+无论 `recap.value_model.freeze_backbone` 如何设置，都只更新 VLA。
+`freeze_backbone` 只控制独立价值训练时是否更新 critic 的 Qwen 主干。
+旧的 `freeze_critic: false` 已不支持；旧配置需删除 `value_loss_weight`
+及不再使用的 `trainer.learning_rate.online_advantage`。
 
-| `freeze_critic` | `recap.value_model.freeze_backbone` | 更新参数 |
-| --- | --- | --- |
-| `true` | 任意 | 整个 critic 冻结并保持 eval，只训练 VLA |
-| `false` | `true` | 训练 VLA 与 value head，冻结 critic 的 Qwen 主干 |
-| `false` | `false` | 训练 VLA、value head 与 critic 的 Qwen 主干 |
-
-正负标签经过阈值比较和文本化，action loss 不能沿此路径反传到 critic。
-因此解除冻结时，两个策略训练入口会优化
-`loss = action_loss + value_loss_weight * value_loss`，其中 value loss 使用当前观测的
-MC return 分类监督。`value_loss_weight` 必须为正；可通过
-`trainer.learning_rate.online_advantage` 单独设置 critic 学习率。
-训练日志增加 `value_loss`（解除冻结时）与 `advantage_mean`。
-critic 随策略 state_dict 保存；联合训练中阈值保持配置值，必要时应重新校准。
+策略优化目标为 `loss = action_loss`，其中动作预测已经以正负优势文本为条件；
+训练时以 `dropout_probability` 的概率移除条件，学习无条件动作预测。
+优势不是 loss 权重，也不直接加入总损失。正负标签经过阈值比较和文本化，
+action loss 不能沿此路径反传到 critic。
+独立价值训练仍以 MC return 的离散化分类交叉熵优化 `value_loss`（论文式 1）。
+当前 OFT 保留条件 L1 动作回归，并未复现论文的离散动作加 flow matching 损失。
+策略训练日志增加 `advantage_mean`；critic 随策略 state_dict 保存。
+收集新一轮数据后，先重新训练 critic、校准阈值，再启动下一轮策略训练。
 权重路径为 `online_advantage.value_model.*`；加载时自动兼容旧的
 `online_advantage.critic.value_model.*` 路径，独立价值模型的 `critic.pt` 格式保持不变。
 

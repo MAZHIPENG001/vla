@@ -53,12 +53,16 @@ def main():
         output = model(examples, generator=torch.Generator().manual_seed(7))
         loss = output.get("loss", output["action_loss"])
     assert torch.isfinite(loss) and loss.ndim == 0
+    assert loss is output["action_loss"] and "value_loss" not in output
+    assert not model.online_advantage.value_model.training
+    assert all(not p.requires_grad for p in model.online_advantage.parameters())
     print(f"[train] total_loss={loss.item():.6f}, action_loss={output['action_loss'].item():.6f}")
     if args.backward:
         loss.backward()
         gradients = [p.grad for p in model.action_model.parameters() if p.grad is not None]
         assert gradients and all(torch.isfinite(g).all() for g in gradients)
         assert any(g.abs().sum() > 0 for g in gradients)
+        assert all(p.grad is None for p in model.online_advantage.parameters())
         model.zero_grad(set_to_none=True)
         print("[backward] finite nonzero action-head gradients")
 
