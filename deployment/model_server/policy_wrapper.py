@@ -10,7 +10,7 @@ already-unnormalized actions.
 Client-side responsibilities that REMAIN on the client:
   - environment-specific adapters (image_history, gripper sticky, action
     ensembling)
-  - chunk-cache scheduling (`step % chunk_size == 0` triggers a new infer)
+  - chunk-cache scheduling (client-configured replan interval)
 
 Exposed API:
   - ``metadata`` (dict, sent at handshake): ``action_chunk_size``,
@@ -55,6 +55,9 @@ class PolicyServerWrapper:
         # Co-located metadata.
         model_cfg, _ = read_mode_config(self._ckpt_path)
         self._model_cfg = model_cfg
+        # Match LeRobotSingleDataset._pack_sample's default. Passing state to
+        # a no-state OFT checkpoint changes its language prompt.
+        self._include_state = model_cfg["datasets"]["vla_data"].get("include_state", False) not in ["False", False]
 
         # action_chunk_size = future_action_window_size + 1 (matches old client).
         action_model_cfg = model_cfg["framework"]["action_model"]
@@ -115,6 +118,7 @@ class PolicyServerWrapper:
             "action_chunk_size": self._action_chunk_size,
             "available_unnorm_keys": self._available_unnorm_keys,
             "default_unnorm_key": self._default_unnorm_key,
+            "include_state": self._include_state,
         }
         # Enrich with per-embodiment keys when a default processor already exists.
         if self._default_unnorm_key is not None:
@@ -152,6 +156,8 @@ class PolicyServerWrapper:
                 )
         proc = self._get_processor(effective_key)
 
+        if not self._include_state:
+            examples = [{k: v for k, v in example.items() if k != "state"} for example in examples]
         out = self._framework.predict_action(examples=examples, **kwargs)
         normalized = np.asarray(out["normalized_actions"])  # (B, T, D)
 

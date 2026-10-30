@@ -25,6 +25,8 @@ base_port=$4 # unique port for this eval instance
 ##### === variables for which evaluation to setup ===
 
 num_trials_per_task=50
+replan_interval="${REPLAN_INTERVAL:-8}"
+gripper_encoding="${GRIPPER_ENCODING:-binary_open}"
 host="127.0.0.1"
 
 CUDA_VISIBLE_DEVICES=$gpu_id ${starVLA_python} deployment/model_server/server_policy.py \
@@ -41,7 +43,7 @@ server_pid=$!
 model_root=$(echo "$your_ckpt" | awk -F'/checkpoints/' '{print $1}')
 folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 
-video_out_path="${model_root}/videos/${task_suite_name}/${folder_name}"
+video_out_path="${model_root}/videos/${task_suite_name}/${folder_name}/replan_${replan_interval}_${gripper_encoding}"
 log_path="${model_root}/logs/${task_suite_name}"
 mkdir -p "$video_out_path"
 mkdir -p "$log_path"
@@ -54,8 +56,10 @@ ${LIBERO_python} ./examples/LIBERO/eval_files/eval_libero.py \
     --args.port $base_port \
     --args.task-suite-name "$task_suite_name" \
     --args.num-trials-per-task "$num_trials_per_task" \
+    --args.replan-interval "$replan_interval" \
+    --args.gripper-encoding "$gripper_encoding" \
     --args.video-out-path "$video_out_path"  \
-    2>&1 | tee ${log_path}/${folder_name}.log
+    2>&1 | tee "${log_path}/${folder_name}_replan_${replan_interval}_${gripper_encoding}.log"
 
 echo "Evaluation completed. Videos saved to ${video_out_path}, logs saved to ${log_path}/${folder_name}.log"
 

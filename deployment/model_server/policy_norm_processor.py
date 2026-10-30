@@ -190,6 +190,12 @@ def _build_dataset_metadata(
         """
         stats_per_subkey: Dict[str, Dict[str, List[float]]] = {}
         meta_per_subkey: Dict[str, StateActionMetadata] = {}
+        expected_dim = sum(key_dims[k] for k in keys)
+        for stat_name, arr in combined.items():
+            if len(arr) != expected_dim:
+                raise ValueError(
+                    f"Saved {stat_name} has {len(arr)} channels, expected {expected_dim} for {list(keys)}"
+                )
         cursor = 0
         for full_key in keys:
             subkey = full_key.split(".", 1)[1]
@@ -199,10 +205,6 @@ def _build_dataset_metadata(
                 if stat_name == "mask":
                     continue
                 end = cursor + dim_k
-                if end > len(arr):
-                    # Saved combined array shorter than expected (truncated
-                    # pad channels etc.). Skip this stat field silently.
-                    continue
                 per_key[stat_name] = [float(v) for v in arr[cursor:end]]
             stats_per_subkey[subkey] = per_key
             meta_per_subkey[subkey] = StateActionMetadata(

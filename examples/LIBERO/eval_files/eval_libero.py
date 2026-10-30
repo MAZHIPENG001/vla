@@ -15,16 +15,14 @@ from libero.libero.envs import OffScreenRenderEnv
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+from examples.LIBERO.eval_files.libero_contract import GripperEncoding, gripper_to_libero, libero_images
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
 
 def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
-    arr = np.asarray(open_val, dtype=np.float32).reshape(-1)
-    v = float(arr[0])
-    bin_val = 1.0 - 2.0 * (v > 0.5)
-    return np.asarray([bin_val], dtype=np.float32)
+    return gripper_to_libero(open_val, "binary_open")
 
 
 @dataclasses.dataclass
@@ -53,6 +51,12 @@ class Args:
 
     # Dataset key for un-normalization. None = auto (only if model trained on a single dataset).
     unnorm_key: str | None = None
+
+    # None executes the full predicted chunk (8 for the released OFT model).
+    replan_interval: int | None = None
+    gripper_encoding: GripperEncoding = "binary_open"
+    # None follows checkpoint metadata; old servers default to no state.
+    include_state: bool | None = None
 
     post_process_action: bool = True
 
@@ -92,7 +96,19 @@ def eval_libero(args: Args) -> None:
         host=args.host,
         port=args.port,
         unnorm_key=args.unnorm_key,
+        replan_interval=args.replan_interval,
+        include_state=args.include_state,
     )
+    logging.info(
+        "LIBERO contract: gripper_encoding=%s (-1=open, +1=close), "
+        "cameras=primary,wrist; rotate=180; resize=%s bicubic; "
+        "include_state=%s; replan_interval=%d",
+        args.gripper_encoding, client_model.image_size, client_model.include_state,
+        client_model.replan_interval,
+    )
+    if args.pretrained_path:
+        server_ckpt = client_model._server_metadata.get("ckpt_path")
+        logging.info("Requested checkpoint=%s; server checkpoint=%s", args.pretrained_path, server_ckpt)
 
     # Optional smoke-test cap (still useful for quick verification with -1 = full run).
     n_eval_tasks = num_tasks_in_suite if args.max_tasks <= 0 else min(args.max_tasks, num_tasks_in_suite)
@@ -142,8 +158,7 @@ def eval_libero(args: Args) -> None:
                     continue
 
                 # IMPORTANT: rotate 180 degrees to match train preprocessing
-                img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-                wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+                img, wrist_img = libero_images(obs)
 
                 # Save preprocessed image for replay video
                 replay_images.append(img)
@@ -186,7 +201,7 @@ def eval_libero(args: Args) -> None:
                 world_vector_delta = np.asarray(raw_action.get("world_vector"), dtype=np.float32).reshape(-1)
                 rotation_delta = np.asarray(raw_action.get("rotation_delta"), dtype=np.float32).reshape(-1)
                 open_gripper = np.asarray(raw_action.get("open_gripper"), dtype=np.float32).reshape(-1)
-                gripper = _binarize_gripper_open(open_gripper)
+                gripper = gripper_to_libero(open_gripper, args.gripper_encoding)
 
                 if not (world_vector_delta.size == 3 and rotation_delta.size == 3 and open_gripper.size == 1):
                     logging.warning(
@@ -200,6 +215,8 @@ def eval_libero(args: Args) -> None:
                     )
                 else:
                     delta_action = np.concatenate([world_vector_delta, rotation_delta, gripper], axis=0)
+                if not np.isfinite(delta_action).all():
+                    raise ValueError(f"Non-finite LIBERO action: {delta_action}")
 
                 full_actions.append(delta_action)
 
@@ -237,6 +254,7 @@ def eval_libero(args: Args) -> None:
         # Log final results
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+        env.close()
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")

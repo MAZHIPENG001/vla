@@ -39,12 +39,24 @@ class ModelClient:
         host: str = "0.0.0.0",
         port: int = 10095,
         image_size: Sequence[int] = (224, 224),
+        replan_interval: Optional[int] = None,
+        include_state: Optional[bool] = None,
     ) -> None:
         # Connect & receive handshake metadata (action_chunk_size, etc.)
         self.client = WebsocketClientPolicy(host, port)
         meta = self.client.get_server_metadata()
         self.action_chunk_size = int(meta["action_chunk_size"])
         self._server_metadata = meta
+        if self.action_chunk_size <= 0:
+            raise ValueError(f"Invalid server action_chunk_size: {self.action_chunk_size}")
+        self.replan_interval = self.action_chunk_size if replan_interval is None else replan_interval
+        if not 1 <= self.replan_interval <= self.action_chunk_size:
+            raise ValueError(
+                f"replan_interval must be in [1, {self.action_chunk_size}], got {self.replan_interval}"
+            )
+        self.include_state = (
+            meta.get("include_state", False) if include_state is None else include_state
+        )
 
         self.image_size: tuple = tuple(image_size)
         self.policy_setup = policy_setup
@@ -79,8 +91,10 @@ class ModelClient:
             self.action_ensembler = None
         self.num_image_history = 0
 
-        # Cached unnormalized chunk; refreshed every `action_chunk_size` steps.
+        # Index is relative to the most recent prediction, never global step modulo T.
         self.raw_actions: Optional[np.ndarray] = None
+        self._action_index = 0
+        self._last_step: Optional[int] = None
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
         self.image_history.append(image)
@@ -97,13 +111,15 @@ class ModelClient:
         self.sticky_gripper_action = 0.0
         self.previous_gripper_action = None
         self.raw_actions = None
+        self._action_index = 0
+        self._last_step = None
 
-    def step(self, example: dict, step: int = 0, **kwargs) -> dict:
+    def step(self, example: dict, step: Optional[int] = None, **kwargs) -> dict:
         """One env step.
 
         Args:
             example: dict with keys ``image`` (list of np.uint8 HWC arrays) and ``lang`` (str).
-            step: env step counter; used for chunk caching.
+            step: optional env counter; discontinuities invalidate stale predictions.
 
         Returns:
             ``{"raw_action": {"world_vector": ..., "rotation_delta": ..., "open_gripper": ...}}``
@@ -111,6 +127,14 @@ class ModelClient:
         task_description = example.get("lang", None)
         if task_description != self.task_description:
             self.reset(task_description)
+
+        if step is not None and self._last_step is not None and step != self._last_step + 1:
+            self.raw_actions = None
+            self._action_index = 0
+        self._last_step = step
+
+        if not self.include_state:
+            example = {key: value for key, value in example.items() if key != "state"}
 
         # Resize images to self.image_size if needed.
         if self.image_size and example.get("image"):
@@ -121,14 +145,19 @@ class ModelClient:
                 if arr.shape[:2] != target_hw:
                     arr = np.asarray(
                         Image.fromarray(arr).resize(
-                            (target_hw[1], target_hw[0]), Image.BILINEAR
+                            # _pack_sample uses PIL.resize without resample;
+                            # for RGB this is BICUBIC, not BILINEAR.
+                            (target_hw[1], target_hw[0]), Image.Resampling.BICUBIC
                         )
                     )
                 resized.append(arr)
             example = {**example, "image": resized}
 
         # Refresh chunk if needed.
-        if step % self.action_chunk_size == 0 or self.raw_actions is None:
+        if (
+            self.raw_actions is None
+            or self._action_index >= min(self.replan_interval, len(self.raw_actions))
+        ):
             vla_input = {
                 "examples": [example],
                 "unnorm_key": self.unnorm_key,
@@ -144,13 +173,23 @@ class ModelClient:
                     f"Key 'actions' not found in response data: keys={list(response.get('data', {}).keys())}, "
                     f"full response={response}"
                 )
-            self.raw_actions = np.asarray(actions_batch)[0]  # (T, D)
+            actions_batch = np.asarray(actions_batch, dtype=np.float32)
+            if (
+                actions_batch.ndim != 3 or actions_batch.shape[0] != 1
+                or actions_batch.shape[1] == 0 or actions_batch.shape[2] != 7
+                or not np.isfinite(actions_batch).all()
+            ):
+                raise ValueError(f"Expected finite LIBERO actions (1, T>0, 7), got {actions_batch.shape}")
+            self.raw_actions = actions_batch[0]
+            self._action_index = 0
 
-        raw_actions = self.raw_actions[step % self.action_chunk_size][None]
+        raw_actions = self.raw_actions[self._action_index][None]
+        self._action_index += 1
         raw_action = {
             "world_vector": np.array(raw_actions[0, :3]),
             "rotation_delta": np.array(raw_actions[0, 3:6]),
-            "open_gripper": np.array(raw_actions[0, 6:7]),  # 1 = open; 0 = close
+            # Legacy field name. Encoding is selected by eval's gripper_encoding.
+            "open_gripper": np.array(raw_actions[0, 6:7]),
         }
         return {"raw_action": raw_action}
 
