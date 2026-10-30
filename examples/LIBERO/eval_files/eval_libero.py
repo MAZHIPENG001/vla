@@ -110,6 +110,7 @@ class Args:
     post_process_action: bool = True
 
     job_name: str = "test"
+    resize_size: int = 224  # Resize images to this size before sending to model
 
 
 def eval_libero(args: Args) -> None:
