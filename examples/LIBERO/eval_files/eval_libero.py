@@ -165,8 +165,12 @@ def eval_libero(args: Args) -> None:
 
                 # align key with model API --> two images provided here --> check training
                 example_dict = {
-                    "image": [observation["observation.primary"][0], observation["observation.wrist_image"][0]],
+                    "image": [
+                        observation["observation.primary"][0],
+                        observation["observation.wrist_image"][0],
+                    ],
                     "lang": observation["instruction"][0],
+                    "state": observation["observation.state"][0],
                 }
 
                 start_time = time.time()

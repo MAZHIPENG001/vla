@@ -100,7 +100,7 @@ bash examples/LIBERO/train_files/run_libero_train.sh
 Value Model 独立训练、断点续训和优势阈值校准见 [RECAP 训练指南](vla/model/modules/recap/README.md)。
 默认冻结 Qwen 主干，仅训练 Value Head；支持 bf16、单卡、DDP 和现有 DeepSpeed 配置。
 
-## 模型测评
+## 模型测评-LIBERO
 ### Step 0: Set up the LIBERO environment
 Create a separate conda environment for the LIBERO simulator:
 
