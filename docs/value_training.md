@@ -198,6 +198,80 @@ python -m vla.training.label_recap_advantages \
 阈值和 checkpoint 来源的 `metadata.json`、完整配置。已有标签需要显式 `--overwrite_labels`。
 标签目录已存在时请使用新的 labeling.output_dir。训练与标签导出的奖励及观测约定必须相同。
 
+## VLA 在线计算与冻结选项
+
+策略为 `QwenOFTRecap` 时，`framework.advantage_conditioning` 控制三种模式：
+
+| 配置 | VLA 训练行为 |
+| --- | --- |
+| `enabled: false` | 不添加 Advantage 文本，不读取优势标签，不加载 critic |
+| `enabled: true, source: offline`（默认） | 读取 sidecar/parquet 的正负标签 |
+| `enabled: true, source: online` | 加载 critic，每个 batch 即时计算优势与正负条件 |
+
+在线模式可以直接修改同一份任务 YAML：
+
+```yaml
+framework:
+  name: QwenOFTRecap
+  advantage_conditioning:
+    enabled: true
+    source: online
+    freeze_critic: true
+    value_loss_weight: 1.0
+    dropout_probability: 0.3
+    inference_condition: positive
+recap:
+  value_model:
+    checkpoint: /path/to/recap_value/final/critic.pt
+    freeze_backbone: true
+  advantage:
+    mode: posttrain
+    n_steps: 50
+    task_thresholds:
+      "your_dataset_name:0": 0.02  # 示例数值，须换成该任务的校准阈值
+```
+
+`task_thresholds` 使用“数据集目录名:原始 task_index”，避免混合数据集重排整数任务 ID
+导致阈值错配。标签入口现在会把它写进 `recap.labeling.output_dir/config.yaml`；
+旧版输出也可从 `metadata.json` 的 `thresholds` 复制。
+在线模式不要求 `advantage_labels.jsonl`，但必须提供训练过的 critic 和明确的任务阈值；
+阈值应在代表性数据上校准，不能用每个随机 batch 的分位数替代。
+
+普通 VLA DataLoader 自动禁用 sidecar 读取、开启回报目标，并沿用现有数据集的随机混合采样。
+worker 只读取已录制轨迹的奖励和必要后续观测，critic 在模型所在设备计算：
+
+```text
+posttrain:    A_t = sum(r[t:t+N]) + V(o[t+N]) - V(o[t])
+pretrain:    A_t = sum(r[0:episode_length]) - V(o[t])
+return_to_go: A_t = sum(r[t:episode_length]) - V(o[t])
+```
+
+窗口到达轨迹末尾时 bootstrap 为 0；critic 每次只接收一个时刻的图像、指令和可选 state，
+后续观测单独求值，动作标签和优势条件不会输入 critic。
+这里的“在线”指训练时即时重算已有轨迹的优势，不包含环境交互采集。
+仍需配置 `recap.data/reward`，确保轨迹完整、奖励归一化与 critic 训练一致。
+
+冻结行为分两层：
+
+| `freeze_critic` | `recap.value_model.freeze_backbone` | 更新参数 |
+| --- | --- | --- |
+| `true` | 任意 | 整个 critic 冻结并保持 eval，只训练 VLA |
+| `false` | `true` | 训练 VLA 与 value head，冻结 critic 的 Qwen 主干 |
+| `false` | `false` | 训练 VLA、value head 与 critic 的 Qwen 主干 |
+
+正负标签经过阈值比较和文本化，action loss 不能沿此路径反传到 critic。
+因此解除冻结时，两个策略训练入口会优化
+`loss = action_loss + value_loss_weight * value_loss`，其中 value loss 使用当前观测的
+MC return 分类监督。`value_loss_weight` 必须为正；可通过
+`trainer.learning_rate.online_advantage` 单独设置 critic 学习率。
+训练日志增加 `value_loss`（解除冻结时）与 `advantage_mean`。
+critic 随策略 state_dict 保存；联合训练中阈值保持配置值，必要时应重新校准。
+
+部署时 `predict_action` 默认固定使用 `Advantage: positive`，不执行 critic；
+可选 negative/unconditional，`enabled: false` 则不附加优势条件。
+当前策略沿用 OFT 的动作 token → 隐藏状态 → MLP 连续动作与 L1 loss。
+在线配置创建策略实例时仍会构建 critic，加载完整策略 checkpoint 后无需为动作推理执行它。
+
 ## 验证
 
 ```bash

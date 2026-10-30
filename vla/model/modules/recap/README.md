@@ -310,7 +310,9 @@ print(condition.to_text())           # 展平为 8 个字符串，丢弃或 padd
 `QwenOFTRecap`，继承原 `QwenOFT` 的动作查询、MLP 动作头、L1 loss 和预测接口。
 任务配置位于 `examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`：
 `framework` 配置策略，`recap` 配置独立价值模型，仍共用一份任务 YAML。
-新策略自身不加载价值模型；使用相同骨干、动作维度与 horizon 时可加载原 OFT 的 state_dict。
+默认离线模式不加载价值模型；使用相同骨干、动作维度与 horizon 时可加载原 OFT 的 state_dict。
+在线模式可在训练 batch 中即时计算条件，并按配置冻结或训练 critic，详见
+[VLA 在线计算与冻结选项](../../../../docs/value_training.md#vla-在线计算与冻结选项)。
 
 策略输入顺序为：图像 + 完整任务提示/状态 → 可选子任务文本 → Advantage 条件 → 动作查询。
 条件只影响后面的动作查询；CoT_prompt 模板先完成展开，条件和动作查询再追加。
@@ -341,6 +343,10 @@ unconditional = policy.predict_action(batch, advantage="unconditional")["normali
 
 `framework.advantage_conditioning` 包含：
 
+- `enabled: true`：设为 false 时不添加条件、不读取优势标签、不加载 critic。
+- `source: offline`：可设 online，在训练时加载 critic 即时计算优势。
+- `freeze_critic: true`：online 模式冻结整个 critic；false 时增加 MC value loss。
+- `value_loss_weight: 1.0`：解除冻结时总损失中 value loss 的权重。
 - `dropout_probability: 0.3`：直接传标签时，训练以 30% 概率删去条件文本。
 - `sft_positive: false`：设为 true 时，直接标签模式下将全部示范视为正；只用于示范 SFT。
 - `inference_condition: positive`：部署默认正优势，可选 negative/unconditional。
@@ -426,7 +432,7 @@ advantage_labels:
 原始 Parquet 的读取仍需要项目数据链路对应的 Parquet 引擎（如 pyarrow）。
 普通旧策略或纯示范 SFT 可设 `source: none`（未配置时也是 none）。
 示范 SFT 还需设置 `framework.advantage_conditioning.sft_positive: true`；
-默认配置 source=sidecar 要求先生成标签文件。
+默认 offline 模式配置 source=sidecar，要求先生成标签文件；online 模式自动禁用该读取。
 
 离线标注结果可通过导出接口写入，不修改原始视频或动作：
 

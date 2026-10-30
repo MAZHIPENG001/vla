@@ -1,5 +1,4 @@
-# Advantage-conditioned OFT policy. Training examples require boolean advantage_indicator.
-# Critic settings remain in recap; this policy does not load the critic.
+# Advantage-conditioned OFT policy: offline labels by default, optional online critic.
 run_id: starvla
 run_root_dir: playground/Checkpoints
 seed: 42
@@ -19,6 +18,10 @@ framework:
     action_horizon: 8
     action_model_type: MLP
   advantage_conditioning:
+    enabled: true  # false: ordinary OFT training without advantage labels or critic.
+    source: offline  # offline: sidecar/parquet; online: compute from critic each batch.
+    freeze_critic: true  # online only; false adds supervised value_loss to policy training.
+    value_loss_weight: 1.0
     dropout_probability: 0.3
     sft_positive: false
     inference_condition: positive
@@ -40,6 +43,7 @@ recap:
     dropout_probability: 0.3
     prediction_batch_size: 8
     thresholds: {}
+    task_thresholds: {}  # Online: "dataset_name:task_id": calibrated epsilon (see labeling/config.yaml).
   # Explicit outcomes; unknown or truncated episodes must not be treated as successes.
   data:
     success_source: all_success  # manifest | column | all_success (known successful demos only)
@@ -129,6 +133,7 @@ trainer:
     base: 2.5e-05
     qwen_vl_interface: 1.0e-05
     action_model: 0.0001
+    online_advantage: 1.0e-05
   lr_scheduler_type: cosine_with_min_lr
   scheduler_specific_kwargs:
     min_lr: 1.0e-06

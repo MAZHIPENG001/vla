@@ -34,6 +34,7 @@ class QwenRecapDefaultConfig:
         "dropout_probability": 0.3,
         "prediction_batch_size": 8,  # Number of observations per critic inference.
         "thresholds": {},  # Calibrated task_id -> epsilon, required for conditions.
+        "task_thresholds": {},  # Stable dataset_name:task_id -> epsilon for online VLA.
     })
 
 

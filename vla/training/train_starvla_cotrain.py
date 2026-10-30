@@ -331,7 +331,7 @@ class VLAMTrainer(TrainerUtils):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
                 action_loss = output_dict["action_loss"]
-                total_loss = action_loss
+                total_loss = output_dict.get("loss", action_loss)
             self.accelerator.backward(total_loss)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -356,6 +356,9 @@ class VLAMTrainer(TrainerUtils):
                 }
             )
 
+        for key in ("value_loss", "advantage_mean"):
+            if key in output_dict:
+                log_dict[key] = output_dict[key].item()
         return log_dict
 
     def _finalize_training(self):

@@ -1409,6 +1409,17 @@ class LeRobotSingleDataset(Dataset):
             sample.update({"reward": float(episode.rewards[base_index]),
                            "return": float(episode.returns[base_index]), "task_key": episode.task_key,
                            "is_intervention": bool(episode.interventions[base_index])})
+            if self.data_cfg.get("return_online_advantage", False):
+                from vla.dataloader.recap_targets import online_advantage_target
+
+                reward, bootstrap_index = online_advantage_target(
+                    episode, base_index, **self.data_cfg.online_advantage_config,
+                )
+                bootstrap = None
+                if bootstrap_index is not None:
+                    future = self._pack_sample(self.transforms(self.get_step_data(trajectory_id, bootstrap_index)))
+                    bootstrap = {key: future[key] for key in ("image", "lang", "state") if key in future}
+                sample.update(advantage_reward=reward, advantage_bootstrap=bootstrap)
         return sample
 
     def _attach_advantage_label(self, sample, trajectory_id, base_index):

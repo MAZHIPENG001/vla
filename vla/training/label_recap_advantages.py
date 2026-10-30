@@ -66,6 +66,10 @@ def label(cfg, data_loader, device, *, overwrite=False):
         torch.full((ep.length,), store.task_ids[ep.task_key], dtype=torch.long) for ep, _, _ in results
     ])
     critic.fit_thresholds(advantages, task_ids)
+    critic.config.recap.advantage.task_thresholds = {
+        key: float(critic.config.recap.advantage.thresholds[task_id])
+        for key, task_id in store.task_ids.items()
+    }
     interventions = torch.cat([ep.interventions for ep, _, _ in results])
     condition = critic.make_condition(advantages, task_ids, intervention_mask=interventions)
     assert condition.conditioning_mask.all(), "offline labels must not use conditioning dropout"

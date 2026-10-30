@@ -44,12 +44,30 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe", *, dataset=None, pr
         from vla.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
 
         # Resolve interpolations while still attached to the full task config.
-        data_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True)["datasets"]["vla_data"])
+        full_cfg = getattr(cfg, "_cfg", cfg)
+        data_cfg = OmegaConf.create(OmegaConf.to_container(full_cfg, resolve=True)["datasets"]["vla_data"])
         profiles = data_cfg.pop("profiles", {})
         if profile is not None:
             if profile not in profiles:
                 raise ValueError(f"unknown datasets.vla_data profile: {profile}")
             data_cfg = OmegaConf.merge(data_cfg, profiles[profile])
+        elif OmegaConf.select(full_cfg, "framework.name") == "QwenOFTRecap":
+            conditioning = OmegaConf.select(full_cfg, "framework.advantage_conditioning", default={})
+            if not conditioning.get("enabled", True):
+                data_cfg.advantage_labels = {"source": "none"}
+                data_cfg.return_online_advantage = False
+            elif conditioning.get("source", "offline") == "online":
+                # Worker processes prepare scalar rewards and a bootstrap
+                # observation. Only the model process loads/runs the critic.
+                recap = OmegaConf.select(full_cfg, "recap")
+                data_cfg.advantage_labels = {"source": "none"}
+                data_cfg.return_value_targets = True
+                data_cfg.value_target_config = OmegaConf.to_container(recap, resolve=True)
+                data_cfg.return_online_advantage = True
+                data_cfg.online_advantage_config = {
+                    "mode": recap.advantage.get("mode", "posttrain"),
+                    "n_steps": recap.advantage.get("n_steps", 50),
+                }
         if dataset is None:
             dataset = get_vla_dataset(
                 data_cfg=data_cfg, mode=mode, seed=cfg.get("seed", 42),

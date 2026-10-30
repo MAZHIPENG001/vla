@@ -373,7 +373,7 @@ class VLATrainer(TrainerUtils):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
                 action_loss = output_dict["action_loss"]
-                total_loss = action_loss
+                total_loss = output_dict.get("loss", action_loss)
 
             self.accelerator.backward(total_loss)
 
@@ -389,9 +389,13 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 self.lr_scheduler.step()
 
-        return {
+        metrics = {
             "action_dit_loss": action_loss.item(),
         }
+        for key in ("value_loss", "advantage_mean"):
+            if key in output_dict:
+                metrics[key] = output_dict[key].item()
+        return metrics
 
     def _finalize_training(self):
         """Training end processing."""

@@ -44,6 +44,23 @@ class Episode:
         return len(self.rewards)
 
 
+def online_advantage_target(episode, frame, *, mode="posttrain", n_steps=50):
+    """Scalar reward target and optional bootstrap frame within this episode."""
+    frame = index(frame, "frame_index")
+    if frame >= episode.length:
+        raise ValueError("frame_index must be inside the episode")
+    if not isinstance(n_steps, int) or isinstance(n_steps, bool) or n_steps < 1:
+        raise ValueError("n_steps must be a positive integer")
+    if mode == "posttrain":
+        end = min(frame + n_steps, episode.length)
+        return float(episode.rewards[frame:end].sum()), end if end < episode.length else None
+    if mode == "pretrain":
+        return float(episode.rewards.sum()), None
+    if mode == "return_to_go":
+        return float(episode.returns[frame]), None
+    raise ValueError("advantage mode must be posttrain, pretrain or return_to_go")
+
+
 class RecapEpisodes:
     """Validate complete trajectory tables and cache scalar targets only.
 

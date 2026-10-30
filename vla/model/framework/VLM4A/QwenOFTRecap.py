@@ -21,6 +21,10 @@ class QwenOFTRecapDefaultConfig(QwenOFTDefaultConfig):
         **QwenOFTDefaultConfig().action_model, "action_horizon": 8,
     })
     advantage_conditioning: dict = field(default_factory=lambda: {
+        "enabled": True,
+        "source": "offline",  # offline labels | online critic on sampled observations
+        "freeze_critic": True,
+        "value_loss_weight": 1.0,
         "dropout_probability": 0.3,
         "sft_positive": False,
         "inference_condition": "positive",
@@ -45,7 +49,7 @@ class Qwenvl_OFT_Recap(Qwenvl_OFT):
     shape [B]; its mask is authoritative and is never dropped a second time.
     Missing labels raise unless sft_positive=True or the action is a correction.
     Normal OFT image/lang/state/action fields and action_loss remain unchanged.
-    The model owns only the policy backbone, never a critic.
+    Online mode additionally owns a critic; deployment still uses a fixed condition.
     """
 
     def __init__(self, config=None, **kwargs):
@@ -54,6 +58,11 @@ class Qwenvl_OFT_Recap(Qwenvl_OFT):
             config = OmegaConf.merge({"datasets": {"vla_data": {}}}, _to_omegaconf(config))
         config = merge_framework_config(QwenOFTRecapDefaultConfig, config)
         cfg = config.framework.advantage_conditioning
+        for name in ("enabled", "freeze_critic"):
+            if not isinstance(cfg[name], bool):
+                raise ValueError(f"advantage_conditioning.{name} must be bool")
+        if cfg.source not in ("offline", "online"):
+            raise ValueError("advantage_conditioning.source must be offline or online")
         if not 0 <= cfg.dropout_probability <= 1:
             raise ValueError("advantage_conditioning.dropout_probability must lie in [0, 1]")
         if not isinstance(cfg.sft_positive, bool):
@@ -61,9 +70,31 @@ class Qwenvl_OFT_Recap(Qwenvl_OFT):
         if cfg.inference_condition not in ("positive", "negative", "unconditional"):
             raise ValueError("inference_condition must be positive, negative or unconditional")
         super().__init__(config, **kwargs)
+        self.online_advantage = None
+        if cfg.enabled and cfg.source == "online":
+            from vla.model.modules.recap.online import OnlineAdvantage
+            self.online_advantage = OnlineAdvantage(self.config)
+
+    def forward(self, examples=None, **kwargs):
+        online = None
+        if self.online_advantage is not None:
+            if kwargs.get("advantage_condition") is not None or kwargs.get("advantage") is not None:
+                raise ValueError("online mode computes its own advantage condition")
+            online = self.online_advantage(examples, generator=kwargs.get("generator"))
+            kwargs["advantage_condition"] = online["condition"]
+        output = super().forward(examples, **kwargs)
+        if online is not None:
+            output["advantage_mean"] = online["advantages"].mean()
+            if "value_loss" in online:
+                output["value_loss"] = online["value_loss"]
+                weight = self.config.framework.advantage_conditioning.value_loss_weight
+                output["loss"] = output["action_loss"] + weight * online["value_loss"]
+        return output
 
     def _condition_texts(self, examples, *, inference, advantage_condition=None, advantage=None, generator=None):
         cfg = self.config.framework.advantage_conditioning
+        if not cfg.enabled:
+            return [""] * len(examples)
         if inference:
             if advantage_condition is not None:
                 raise ValueError("inference uses advantage='positive', 'negative' or 'unconditional'")
