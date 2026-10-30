@@ -227,7 +227,7 @@ def eval_libero(args: Args) -> None:
                     "image": [observation["observation.primary"][0], observation["observation.wrist_image"][0]],
                     "lang": observation["instruction"][0],
                     # Match training: current EEF position, axis-angle, and two gripper joints.
-                    "state": observation["observation.state"].astype(np.float16),  # (1, 8)
+                    "state": observation["observation.state"][0].astype(np.float16),  # (1, 8)
                 }
 
                 # start_time = time.time()
