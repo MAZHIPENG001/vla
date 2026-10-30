@@ -13,6 +13,7 @@ from vla.training.trainer_utils import initialize_overwatch
 logger = initialize_overwatch(__name__)
 
 from vla.model.framework.base_framework import baseframework
+from vla.model.tools import FRAMEWORK_REGISTRY
 from vla.model.framework.share_tools import merge_framework_config, populate_layerwise_dit_cfg
 from vla.model.modules.action_model.LayerwiseFM_ActionHeader import LayerwiseFlowmatchingActionHead, get_action_model
 from vla.model.modules.vlm import get_vlm_model
@@ -88,6 +89,7 @@ class QwenPIDefaultConfig:
         }
     )
 
+@FRAMEWORK_REGISTRY.register("QwenPI")
 class Qwen_PI(baseframework):
     def __init__(self,config: Optional[dict] = None,**kwargs,) -> None:
         super().__init__()
