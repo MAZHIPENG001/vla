@@ -1,71 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ $# -ne 4 ]]; then
+  echo "Usage: $0 checkpoint task_suite gpu_id port" >&2
+  exit 2
+fi
+
 STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
-LIBERO_HOME="${LIBERO_HOME:-}"
+LIBERO_HOME="${LIBERO_HOME:?LIBERO_HOME is required}"
 LIBERO_python="${LIBERO_python:-python}"
 starVLA_python="${starVLA_python:-python}"
-
-if [[ -z "${LIBERO_HOME}" ]]; then
-  echo "LIBERO_HOME is required."
-  exit 1
-fi
-
-cd "${STARVLA_DIR}"
-export LIBERO_CONFIG_PATH="${LIBERO_HOME}/libero"
-export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${STARVLA_DIR}"
-
-
-
-##### === variables for which evaluation to setup ===
-your_ckpt=$1 # results/Checkpoints/.../steps_20000_pytorch_model.pt
-task_suite_name=$2 # align with your model | libero_goal
-gpu_id=$3   # GPU id to use (e.g. 0, 1, 2, ...)
-base_port=$4 # unique port for this eval instance
-##### === variables for which evaluation to setup ===
-
-num_trials_per_task=50
+your_ckpt=$1
+task_suite_name=$2
+gpu_id=$3
+base_port=$4
+num_trials_per_task="${NUM_TRIALS_PER_TASK:-50}"
 replan_interval="${REPLAN_INTERVAL:-8}"
 gripper_encoding="${GRIPPER_ENCODING:-binary_open}"
-host="127.0.0.1"
 
-CUDA_VISIBLE_DEVICES=$gpu_id ${starVLA_python} deployment/model_server/server_policy.py \
-    --ckpt_path ${your_ckpt} \
-    --port ${base_port} \
-    --use_bf16 &
+cd "${STARVLA_DIR}"
+export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-${LIBERO_HOME}/libero}"
+export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${STARVLA_DIR}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 
-
-# Get the server PID
+CUDA_VISIBLE_DEVICES="$gpu_id" "${starVLA_python}" deployment/model_server/server_policy.py \
+  --ckpt_path "$your_ckpt" --port "$base_port" --use_bf16 &
 server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 
-
-# Extract model_root from your_ckpt
-model_root=$(echo "$your_ckpt" | awk -F'/checkpoints/' '{print $1}')
-folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
-
+model_root="${your_ckpt%/checkpoints/*}"
+model_name="${model_root##*/}"
+folder_name="${model_name}_checkpoints_${your_ckpt##*/}"
+run_name="${folder_name}_replan_${replan_interval}_${gripper_encoding}"
 video_out_path="${model_root}/videos/${task_suite_name}/${folder_name}/replan_${replan_interval}_${gripper_encoding}"
 log_path="${model_root}/logs/${task_suite_name}"
-mkdir -p "$video_out_path"
-mkdir -p "$log_path"
+mkdir -p "$video_out_path" "$log_path"
 
+"${LIBERO_python}" ./examples/LIBERO/eval_files/eval_libero.py \
+  --args.host 127.0.0.1 \
+  --args.port "$base_port" \
+  --args.task-suite-name "$task_suite_name" \
+  --args.num-trials-per-task "$num_trials_per_task" \
+  --args.replan-interval "$replan_interval" \
+  --args.gripper-encoding "$gripper_encoding" \
+  --args.video-out-path "$video_out_path" \
+  2>&1 | tee "${log_path}/${run_name}.log"
 
-
-${LIBERO_python} ./examples/LIBERO/eval_files/eval_libero.py \
-    --args.pretrained-path ${your_ckpt} \
-    --args.host "$host" \
-    --args.port $base_port \
-    --args.task-suite-name "$task_suite_name" \
-    --args.num-trials-per-task "$num_trials_per_task" \
-    --args.replan-interval "$replan_interval" \
-    --args.gripper-encoding "$gripper_encoding" \
-    --args.video-out-path "$video_out_path"  \
-    2>&1 | tee "${log_path}/${folder_name}_replan_${replan_interval}_${gripper_encoding}.log"
-
-echo "Evaluation completed. Videos saved to ${video_out_path}, logs saved to ${log_path}/${folder_name}.log"
-
-if [ -n "$server_pid" ]; then
-    echo "Killing server process with PID: $server_pid"
-    kill $server_pid
-else
-    echo "No server process found to kill."
-fi
+echo "Evaluation completed. Videos: ${video_out_path}; log: ${log_path}/${run_name}.log"

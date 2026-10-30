@@ -6,6 +6,7 @@
 
 - 本地 LIBERO：`/home/ma/GithubDoc/LIBERO`，commit `8f1084e3132a39270c3a13ebe37270a43ece2a01`。
 - 本地上游 StarVLA：`/home/ma/GithubDoc/starVLA`，commit `3422b9f2387b6f682cf02802904a77b23ab13afd`。
+- 评测结构参考：`/home/ma/GithubDoc/openpi/examples/libero/main.py`，采用 episode 内部的动作队列，队列为空时重新推理。
 - 发布模型：`playground/Pretrained_models/StarVLA/Qwen3-VL-OFT-LIBERO-4in1/checkpoints/steps_50000_pytorch_model.pt`，及其运行目录内的 `config.yaml`、`dataset_statistics.json`。
 - 本地训练数据：`playground/Datasets/LEROBOT_LIBERO_DATA/libero_object_no_noops_1.0.0_lerobot`。它的夹爪编码与发布 checkpoint 不同。
 
@@ -18,18 +19,18 @@
 | 180° 旋转 | OpenVLA 再生成脚本说明 HDF5→RLDS 阶段旋转 180°；评测应匹配数据转换。旋转不是 LIBERO 环境本身的统一要求 | 保留两轴反转，不额外转换 RGB/BGR 或 crop |
 | 256→224 | 训练 _pack_sample 使用 RGB PIL resize((224,224))，默认 BICUBIC；原客户端为 BILINEAR，上游也有同样差异 | 改为 BICUBIC，测试与训练调用逐像素一致 |
 | state | 发布配置没有 include_state，训练打包默认 false；原评测始终传 state，当前 QwenOFT 会追加 [STATE] … [ACTION] 提示词 | 客户端遵循服务端元数据，服务端按 checkpoint 再过滤，避免额外提示词 |
-| Action Chunk | future window=7，包含当前动作共 8 步。原取模逻辑仅适合从 0 连续执行整块，不能只改重推理条件而保留旧索引 | 增加 replan_interval，每个新预测索引归零，执行前 k 个动作；重置、任务变化、step 跳变清缓存，短预测提前重推理 |
+| Action Chunk | future window=7，包含当前动作共 8 步。参考 openpi，每个 episode 新建 deque，队列为空才推理 | 取新预测的前 replan_interval 个动作，逐个 popleft；移除全局 step 和预测索引，episode 结束时直接丢弃队列；短预测执行完后重推理 |
 | 反归一化 | 当前与上游 LIBERO DataConfig 都只对前 6 维使用 min/max，夹爪直通，不是 q01/q99 | 保留训练变换逆路径，增加统计维数校验 |
 | 成功判定 | 本地 bddl_base_domain.py 的 step 将 done 覆盖为 _check_success() | 现有 done 计数正确 |
 | 控制器单位 | 环境使用 OSC_POSE，robosuite 自行把 [-1,1] 输入缩放到位置/旋转增量 | 反归一化后直接送入环境，不再额外乘位置/旋转系数 |
 | 等待协议 | StarVLA/OpenVLA 等待 10 步并张开夹爪；LIBERO 自带 lifelong 评测等待 5 步、零夹爪动作 | 发布模型保留前者，不能混用不同策略的评测协议 |
-| 旧参数限制 | action_ensemble=True 只创建对象，没有调用 ensemble；post_process_action 不控制现有后处理；pretrained_path 不加载模型，实际权重由 server 决定 | 记录限制，启动日志同时显示请求和 server 的 checkpoint 路径 |
+| 无用代码清理 | 删除未使用的 ensemble、sticky gripper、图像历史、可视化、DDIM 参数、raw_action 拆分再拼接、计时与调试代码 | 删除 pretrained_path、post_process_action、job_name 和客户端 include_state 覆盖；实际模型和 state 开关由 server 元数据决定，日志显示真实 checkpoint |
 
 发布配置未保存完整训练代码版本、显式相机和 normalization mode。当前 DataConfig、模型说明及数值验证支持上述设置，但紧凑配置不能证明历史训练管线的全部细节。不能用 `results/debug/dataset_statistics.json` 替换发布模型统计：其数据来源及夹爪范围不同。
 
 验证结果：
 
-- `MPLCONFIGDIR=/tmp/vla-mpl NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s tests -v`：9 项通过。客户端测试隔离 websocket 传输层，覆盖 1/2/4/8 重规划、非零初始索引、reset、任务变化、step 跳变、短预测、非法响应、相机像素及 state 过滤。
+- `MPLCONFIGDIR=/tmp/vla-mpl NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s tests -v`：11 项通过。测试隔离 websocket 传输层与仿真依赖，覆盖实际 rollout 的 1/2/4/8 重规划、每次使用最新观测、episode/任务切换、短预测、非法响应、相机像素、state 过滤和资源关闭。
 - 用实际发布 checkpoint 统计验证随机 (8,7) 预测：与六维 min/max、夹爪直通的独立计算最大误差 0.0；再经训练正向变换恢复预测，最大误差 1.1920929e-07。
 - 修改的两个 shell 入口通过 bash -n。尚未运行仿真探针或成功率复测：当前 .venv 未安装 LIBERO/robosuite，源码存在不等于运行依赖就绪。
 
@@ -63,7 +64,9 @@ done
 | binary_close | 0 张开，1 闭合 | 0→-1，1→+1，阈值 0.5 |
 | signed_close（本地原始数据） | -1 张开，+1 闭合 | 保持符号，零保持夹爪 |
 
-若启用 state 训练，还需核对时间索引：当前本仓库 LIBERO DataConfig 为 range(-16,0)，本地上游 registry 为 [0]，评测提供当前单帧。该差异不影响已禁用 state 的发布模型，目前不能宣称 state 模型已完整对齐。客户端 include_state 覆盖只能控制发送，服务端仍以 checkpoint 为准。
+若启用 state 训练，还需核对时间索引：当前本仓库 LIBERO DataConfig 为 range(-16,0)，本地上游 registry 为 [0]，评测提供当前单帧。该差异不影响已禁用 state 的发布模型，目前不能宣称 state 模型已完整对齐。state 是否发送完全遵循 server 的 checkpoint 元数据。
+
+整理后的职责：eval_libero.py 管理 episode、动作队列、统计和视频；ModelClient.infer(example) 只返回未经夹爪映射的 (T,7) 反归一化动作块；libero_contract.py 管理相机、夹爪和可选 state。旧 ModelClient.step/raw_action 接口已移除。发生评测异常时向上抛出，并在 finally 中关闭环境和连接；批量入口也会清理自己启动的 server。
 
 外部依据：
 

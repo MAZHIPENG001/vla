@@ -21,7 +21,7 @@ if [[ -z "${LIBERO_HOME}" ]]; then
 fi
 
 cd "${VLA}"
-export LIBERO_CONFIG_PATH="${LIBERO_HOME}/libero"
+export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-${LIBERO_HOME}/libero}"
 export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${VLA}"
 export MUJOCO_GL="${MUJOCO_GL_VALUE}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM_VALUE}"
@@ -31,7 +31,6 @@ MODEL_ROOT="$(echo "${CKPT}" | awk -F'/checkpoints/' '{print $1}')"
 VIDEO_OUT_PATH="${MODEL_ROOT}/results/${TASK_SUITE_NAME}/${FOLDER_NAME}/replan_${REPLAN_INTERVAL}_${GRIPPER_ENCODING}"
 
 "${LIBERO_PYTHON}" ./examples/LIBERO/eval_files/eval_libero.py \
-  --args.pretrained-path "${CKPT}" \
   --args.host "${HOST}" \
   --args.port "${PORT}" \
   --args.task-suite-name "${TASK_SUITE_NAME}" \
