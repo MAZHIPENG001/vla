@@ -9,8 +9,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-6694}"
 TASK_SUITE_NAME="${TASK_SUITE_NAME:-libero_goal}"
 NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-5}"
-REPLAN_INTERVAL="${REPLAN_INTERVAL:-8}"
-GRIPPER_ENCODING="${GRIPPER_ENCODING:-binary_open}"
+
 MUJOCO_GL_VALUE="${MUJOCO_GL_VALUE:-egl}"
 PYOPENGL_PLATFORM_VALUE="${PYOPENGL_PLATFORM_VALUE:-egl}"
 
@@ -31,10 +30,9 @@ MODEL_ROOT="$(echo "${CKPT}" | awk -F'/checkpoints/' '{print $1}')"
 VIDEO_OUT_PATH="${MODEL_ROOT}/results/${TASK_SUITE_NAME}/${FOLDER_NAME}/replan_${REPLAN_INTERVAL}_${GRIPPER_ENCODING}"
 
 "${LIBERO_PYTHON}" ./examples/LIBERO/eval_files/eval_libero.py \
+  --args.pretrained-path "${CKPT}" \
   --args.host "${HOST}" \
   --args.port "${PORT}" \
   --args.task-suite-name "${TASK_SUITE_NAME}" \
   --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
-  --args.replan-interval "${REPLAN_INTERVAL}" \
-  --args.gripper-encoding "${GRIPPER_ENCODING}" \
   --args.video-out-path "${VIDEO_OUT_PATH}"
