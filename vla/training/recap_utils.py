@@ -16,7 +16,6 @@ from vla.model.modules.recap.recap import QwenRecapDefaultConfig
 VALUE_DATA_PROFILE = {
     "return_frame_info": True, "return_value_targets": True,
     "sampling_mode": "sequential", "transform_mode": "eval", "delete_pause_frame": False,
-    "advantage_labels": {"source": "none"},
     "value_target_config": {
         "data": "${recap.data}", "reward": "${recap.reward}",
         "value_model": {"value_min": "${recap.value_model.value_min}", "value_max": "${recap.value_model.value_max}"},
@@ -43,7 +42,6 @@ PIPELINE_DEFAULTS = {
         "gradient_checkpointing": True,
         "mixed_precision": "bf16", "resume_from_checkpoint": None,
     },
-    "labeling": {"output_dir": "playground/Checkpoints/recap_labels"},
 }
 
 

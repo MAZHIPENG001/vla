@@ -32,15 +32,14 @@ def label(cfg, data_loader, device, *, overwrite=False):
     provenance = validate_checkpoint(cfg, checkpoint)
     cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
     cfg.recap.value_model.checkpoint = str(Path(checkpoint).resolve())
-    labels_config = cfg.datasets.vla_data.get("advantage_labels", {})
-    if labels_config.get("source", "none") != "sidecar":
-        raise ValueError("set datasets.vla_data.advantage_labels.source: sidecar for label export/policy training")
-    relative = relative_path(labels_config.get("path", "meta/advantage_labels.jsonl"))
+    # Export is for inspection/calibration only; VLA never reads these labels.
+    labeling = cfg.recap.get("labeling", {})
+    relative = relative_path(labeling.get("label_path", "meta/advantage_labels.jsonl"))
     targets = [ds.dataset_path / relative for ds in store.datasets]
     for path in targets:
         if path.exists() and not overwrite:
             raise FileExistsError(f"labels already exist: {path}; use --overwrite_labels for explicit replacement")
-    output = Path(cfg.recap.labeling.output_dir)
+    output = Path(labeling.get("output_dir", "playground/Checkpoints/recap_labels"))
     output.mkdir(parents=True, exist_ok=False)
     critic = QwenRecap(cfg).to(device).eval()
     settings = critic.config.recap.advantage

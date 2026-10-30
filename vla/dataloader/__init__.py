@@ -54,13 +54,11 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe", *, dataset=None, pr
         elif OmegaConf.select(full_cfg, "framework.name") == "QwenOFTRecap":
             conditioning = OmegaConf.select(full_cfg, "framework.advantage_conditioning", default={})
             if not conditioning.get("enabled", True):
-                data_cfg.advantage_labels = {"source": "none"}
                 data_cfg.return_online_advantage = False
-            elif conditioning.get("source", "offline") == "online":
+            else:
                 # Worker processes prepare scalar rewards and a bootstrap
                 # observation. Only the model process loads/runs the critic.
                 recap = OmegaConf.select(full_cfg, "recap")
-                data_cfg.advantage_labels = {"source": "none"}
                 data_cfg.return_value_targets = True
                 data_cfg.value_target_config = OmegaConf.to_container(recap, resolve=True)
                 data_cfg.return_online_advantage = True

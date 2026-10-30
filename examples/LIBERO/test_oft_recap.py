@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_yaml", default=str(Path(__file__).parent / "train_files/starvla_oft_recap_libero.yaml"))
     parser.add_argument("--model_id", help="Optional local directory or Hub ID for the policy backbone.")
+    parser.add_argument("--critic_checkpoint", help="Trained critic state_dict; task thresholds must be configured in YAML.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--backward", action="store_true")
     parser.add_argument("--freeze_backbone", action="store_true")
@@ -23,6 +24,12 @@ def main():
     cfg = OmegaConf.load(args.config_yaml)
     if args.model_id:
         cfg.framework.qwenvl.base_vlm = args.model_id
+    if args.critic_checkpoint:
+        cfg.recap.value_model.checkpoint = args.critic_checkpoint
+    thresholds = cfg.recap.advantage.task_thresholds
+    if not thresholds:
+        raise ValueError("configure recap.advantage.task_thresholds before the online policy smoke test")
+    task_key = next(iter(thresholds))
     model = build_framework(cfg).to(args.device)
     if args.freeze_backbone:
         model.qwen_vl_interface.requires_grad_(False)
@@ -35,13 +42,18 @@ def main():
         "image": [image], "lang": "Fold the shirt.", "subtask": "Grasp the sleeve.",
         "action": np.zeros((horizon, dimension), dtype=np.float32),
         "state": np.zeros((1, dimension), dtype=np.float32),
-        "advantage_indicator": label,
-    } for label in (True, False)]
+        "task_key": task_key,
+        "return": (cfg.recap.value_model.value_min + cfg.recap.value_model.value_max) / 2,
+        "advantage_reward": -0.05 if bootstrap else -0.1,
+        "advantage_bootstrap": {"image": [image], "lang": "Fold the shirt."} if bootstrap else None,
+        "is_intervention": False,
+    } for bootstrap in (True, False)]
     model.train()
     with torch.set_grad_enabled(args.backward):
-        loss = model(examples, generator=torch.Generator().manual_seed(7))["action_loss"]
+        output = model(examples, generator=torch.Generator().manual_seed(7))
+        loss = output.get("loss", output["action_loss"])
     assert torch.isfinite(loss) and loss.ndim == 0
-    print(f"[train] action_loss={loss.item():.6f}")
+    print(f"[train] total_loss={loss.item():.6f}, action_loss={output['action_loss'].item():.6f}")
     if args.backward:
         loss.backward()
         gradients = [p.grad for p in model.action_model.parameters() if p.grad is not None]

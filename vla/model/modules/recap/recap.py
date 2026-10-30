@@ -1,5 +1,6 @@
-"""Configured RECAP critic and advantage labeling, following QwenOFT's API style."""
+"""Configured RECAP critic, advantage labeling and online policy conditioning."""
 
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from omegaconf import OmegaConf
 from torch import Tensor, nn
 
 from deployment.model_server.tools.image_tools import to_pil_preserve
-from vla.model.modules.recap.advantage import AdvantageModule
+from vla.model.modules.recap.advantage import AdvantageCondition, AdvantageModule
 from vla.model.modules.recap.value_model import QwenValueModel
 
 @dataclass
@@ -44,10 +45,11 @@ class QwenRecap(nn.Module):
     Like QwenOFT, accepts a full config and batches of image/lang/state examples.
     forward requires a normalized scalar `return` per observation and returns a
     value_loss dictionary. predict_value needs no reward labels. No action tokens
-    or advantage labels are added to the critic's inputs.
+    or advantage labels are added to the critic's inputs. With online=True,
+    forward(..., online=True) also computes policy conditions and optional value loss.
     """
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, *, online=False):
         super().__init__()
         from vla.model.framework.share_tools import _to_omegaconf
         if isinstance(config, Path):
@@ -60,6 +62,10 @@ class QwenRecap(nn.Module):
             _to_omegaconf(config),
         )
         self._validate_config()
+        self.online_enabled = online
+        self.freeze_critic = False
+        if online:
+            self._configure_online()
         advantage = self.config.recap.advantage
         self.advantage = AdvantageModule(
             mode=advantage.mode,
@@ -86,6 +92,9 @@ class QwenRecap(nn.Module):
             expected_bins = torch.linspace(cfg.value_min, cfg.value_max, cfg.num_bins)
             if not torch.allclose(self.value_model.bin_values.cpu().float(), expected_bins):
                 raise ValueError("checkpoint value support does not match config")
+        if self.freeze_critic:
+            self.requires_grad_(False)
+        self.train(self.training)
 
     def _validate_config(self):
         cfg = self.config.recap
@@ -122,8 +131,13 @@ class QwenRecap(nn.Module):
             instructions.append(instruction)
         return images, instructions
 
-    def forward(self, examples: list[dict]) -> dict[str, Tensor]:
-        """Train from image/lang, optional state, and normalized scalar return."""
+    def forward(self, examples: list[dict], *, online=False, generator=None) -> dict:
+        """Train on returns, or compute online policy conditions and value loss."""
+        if online:
+            return self.compute_online_advantage(examples, generator=generator)
+        return self._forward_value(examples)
+
+    def _forward_value(self, examples):
         images, instructions = self._prepare_examples(examples)
         if isinstance(examples, dict):
             examples = [examples]
@@ -187,6 +201,81 @@ class QwenRecap(nn.Module):
             valid_mask=valid_mask, intervention_mask=intervention_mask,
             generator=generator,
         )
+
+    def _configure_online(self):
+        cfg = self.config.framework.advantage_conditioning
+        self.freeze_critic = cfg.freeze_critic
+        weight = cfg.value_loss_weight
+        if isinstance(weight, bool) or not math.isfinite(weight) or weight < 0:
+            raise ValueError("value_loss_weight must be finite and nonnegative")
+        if not self.freeze_critic and weight == 0:
+            raise ValueError("an unfrozen critic requires value_loss_weight > 0")
+        if not self.config.recap.value_model.checkpoint:
+            raise ValueError("online advantage requires a trained recap.value_model.checkpoint")
+        # Keys identify the dataset AND task, so mixtures cannot silently remap IDs.
+        self.task_thresholds = dict(self.config.recap.advantage.get("task_thresholds", {}))
+        if not self.task_thresholds or not all(math.isfinite(v) for v in self.task_thresholds.values()):
+            raise ValueError("online advantage requires finite recap.advantage.task_thresholds (dataset_name:task_id -> threshold)")
+        self.dropout_probability = cfg.dropout_probability
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.freeze_critic:
+            # Conditions still follow the policy's training/dropout mode.
+            self.value_model.eval()
+        return self
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Older policy checkpoints nested QwenRecap inside OnlineAdvantage.critic.
+        if self.online_enabled:
+            old_prefix = prefix + "critic."
+            for key in list(state_dict):
+                if key.startswith(old_prefix):
+                    state_dict.setdefault(prefix + key[len(old_prefix):], state_dict.pop(key))
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                      missing_keys, unexpected_keys, error_msgs)
+
+    @staticmethod
+    def _observation(example):
+        # Neither future actions nor labels enter the critic encoder.
+        return {key: example[key] for key in ("image", "lang", "state") if key in example}
+
+    def compute_online_advantage(self, examples, *, generator=None):
+        """Compute detached advantages, conditions and optional MC value loss."""
+        if not self.online_enabled:
+            raise ValueError("construct QwenRecap with online=True for online advantage computation")
+        if not examples:
+            raise ValueError("online advantage requires a nonempty observation batch")
+        for example in examples:
+            if any(key not in example for key in ("advantage_reward", "advantage_bootstrap", "task_key", "return")):
+                raise ValueError("online advantage requires targets from the online VLA DataLoader")
+            if example["task_key"] not in self.task_thresholds:
+                raise ValueError(f"missing calibrated threshold for task {example['task_key']}")
+        observations = [self._observation(example) for example in examples]
+        # Labels always use deterministic, detached predictions, even while the
+        # independent MC value loss trains the critic in this same forward pass.
+        values = self.predict_value(observations)["values"]
+        targets = values.new_tensor([example["advantage_reward"] for example in examples])
+        indices = [i for i, example in enumerate(examples) if example["advantage_bootstrap"] is not None]
+        if indices:
+            future = [self._observation(examples[i]["advantage_bootstrap"]) for i in indices]
+            targets[indices] += self.predict_value(future)["values"]
+        advantages = (targets - values).detach().float().cpu()
+        keys = sorted({example["task_key"] for example in examples})
+        ids = {key: i for i, key in enumerate(keys)}
+        condition = AdvantageCondition.compute_advantage_condition(
+            advantages, torch.tensor([ids[example["task_key"]] for example in examples]),
+            {ids[key]: self.task_thresholds[key] for key in keys},
+            intervention_mask=torch.tensor([example.get("is_intervention", False) for example in examples], dtype=torch.bool),
+            training=self.training, dropout_probability=self.dropout_probability, generator=generator,
+        )
+        output = {"condition": condition, "advantages": advantages.to(values.device)}
+        if self.training and not self.freeze_critic:
+            training_examples = [{**observation, "return": example["return"]}
+                                 for observation, example in zip(observations, examples)]
+            output["value_loss"] = self._forward_value(training_examples)["value_loss"]
+        return output
 
 
 if __name__ == "__main__":

@@ -37,7 +37,6 @@ datasets:
         sampling_mode: sequential
         transform_mode: eval
         delete_pause_frame: false
-        advantage_labels: {source: none}
         value_target_config:
           data: ${recap.data}
           reward: ${recap.reward}
@@ -52,7 +51,7 @@ datasets:
 ```
 
 原 VLA 调用 `build_dataloader(cfg, dataset_py=...)` 保持原有配置；Value 调用同一入口，
-增加 `profile="value"` 选择配置覆盖。覆盖不修改原配置，也不会影响策略后续读取 sidecar 标签。
+增加 `profile="value"` 选择配置覆盖。覆盖不修改原配置，价值训练与在线策略训练分别准备自己的样本字段。
 `sequential` 让 Dataset 索引与原始帧一一对应，训练可再通过 DataLoader shuffle；
 它不会使用策略删帧索引缓存，读取失败会直接报错，以保留轨迹/帧的对应关系。
 训练/验证使用标准 `torch.utils.data.Subset` 按完整 Episode 划分，再交给同一个加载入口。
@@ -79,7 +78,10 @@ datasets:
 Return 超出 `recap.value_model.value_min/value_max` 会报错，不会裁剪。
 默认模型是 201 档分类价值头，使用量化 Return 的 CE 监督，预测值为分类分布的期望。
 
-默认成功清单位于每个数据集的 `meta/recap_episodes.jsonl`：
+`success_source: all_success` 表示数据已确认全部为成功的完整示范，不需要结果文件；
+`success_source: column` 从轨迹的 `success_column` 读取成功状态，也不需要结果文件。
+只有 `reward.source: episode` 且 `success_source: manifest` 时才读取 `outcome_path`，
+此时需要配置成功／失败清单路径，通常位于每个数据集的 `meta/recap_episodes.jsonl`：
 
 ```jsonl
 {"episode_index": 0, "success": true, "complete": true}
@@ -179,12 +181,15 @@ python -m vla.training.train_recap_value \
 排除多卡 batch 补齐产生的重复帧；训练指标聚合全部 rank。
 `validation_fraction: 0` 显式关闭验证；默认要求至少一个任务能划出独立验证 Episode。
 
-## Advantage 导出
+## 优势检查与阈值校准
+
+这是可选的独立检查工具。VLA 任务 YAML 不包含 `labeling`；该工具的导出选项仅在调用时指定：
 
 ```bash
 python -m vla.training.label_recap_advantages \
   --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml \
-  --checkpoint playground/Checkpoints/recap_value/final/critic.pt --device cuda
+  --checkpoint playground/Checkpoints/recap_value/final/critic.pt --device cuda \
+  --set recap.labeling.output_dir=/tmp/recap_inspection
 ```
 
 标签导出用单进程逐 Episode 分批预测，不保留整条轨迹的图像。
@@ -193,20 +198,24 @@ python -m vla.training.label_recap_advantages \
 跨 Episode 末端使用吸收态 value=0。每个任务在全部有效帧上统一校准阈值。
 离线标签不做 dropout，人工接管帧强制 positive。
 
-每个数据集保存 `meta/advantage_labels.jsonl`，由现有策略 DataLoader 直接读取。
+每个数据集可导出逐帧标签供检查，路径由 `recap.labeling.label_path` 控制，
+默认 `meta/advantage_labels.jsonl`。VLA 训练不读取这些文件。
 `recap.labeling.output_dir` 保存逐帧 reward/value/return/advantage 的 `scores.jsonl`、
 阈值和 checkpoint 来源的 `metadata.json`、完整配置。已有标签需要显式 `--overwrite_labels`。
 标签目录已存在时请使用新的 labeling.output_dir。训练与标签导出的奖励及观测约定必须相同。
 
 ## VLA 在线计算与冻结选项
 
-策略为 `QwenOFTRecap` 时，`framework.advantage_conditioning` 控制三种模式：
+策略为 `QwenOFTRecap` 时，开启优势条件后只支持训练时在线计算：
+
+价值预测、在线优势和条件文本生成统一由 `vla/model/modules/recap/recap.py`
+中的 `QwenRecap` 完成。策略使用 `QwenRecap(config, online=True)`，通过
+`recap(examples, online=True)` 计算在线条件；普通 `recap(examples)` 仍用于价值监督训练。
 
 | 配置 | VLA 训练行为 |
 | --- | --- |
 | `enabled: false` | 不添加 Advantage 文本，不读取优势标签，不加载 critic |
-| `enabled: true, source: offline`（默认） | 读取 sidecar/parquet 的正负标签 |
-| `enabled: true, source: online` | 加载 critic，每个 batch 即时计算优势与正负条件 |
+| `enabled: true`（默认） | 加载 critic，每个 batch 即时计算优势与正负条件 |
 
 在线模式可以直接修改同一份任务 YAML：
 
@@ -215,7 +224,6 @@ framework:
   name: QwenOFTRecap
   advantage_conditioning:
     enabled: true
-    source: online
     freeze_critic: true
     value_loss_weight: 1.0
     dropout_probability: 0.3
@@ -232,12 +240,15 @@ recap:
 ```
 
 `task_thresholds` 使用“数据集目录名:原始 task_index”，避免混合数据集重排整数任务 ID
-导致阈值错配。标签入口现在会把它写进 `recap.labeling.output_dir/config.yaml`；
-旧版输出也可从 `metadata.json` 的 `thresholds` 复制。
-在线模式不要求 `advantage_labels.jsonl`，但必须提供训练过的 critic 和明确的任务阈值；
+导致阈值错配。直接在任务 YAML 中配置校准后的数值；如使用独立检查工具，
+也可从其导出的 `config.yaml` 或 `metadata.json` 中复制。
+训练不会读取 `advantage_labels.jsonl` 或 Parquet 中的预存优势标签，
+必须提供训练过的 critic 和明确的任务阈值；
 阈值应在代表性数据上校准，不能用每个随机 batch 的分位数替代。
 
-普通 VLA DataLoader 自动禁用 sidecar 读取、开启回报目标，并沿用现有数据集的随机混合采样。
+开启优势条件时，VLA DataLoader 自动开启回报目标，并沿用现有数据集的随机混合采样。
+已删除 `source`、`sft_positive` 和 Dataset 的优势标签读取功能；
+旧配置应移除这两个策略选项及 `datasets.vla_data.advantage_labels`。
 worker 只读取已录制轨迹的奖励和必要后续观测，critic 在模型所在设备计算：
 
 ```text
@@ -266,6 +277,8 @@ MC return 分类监督。`value_loss_weight` 必须为正；可通过
 `trainer.learning_rate.online_advantage` 单独设置 critic 学习率。
 训练日志增加 `value_loss`（解除冻结时）与 `advantage_mean`。
 critic 随策略 state_dict 保存；联合训练中阈值保持配置值，必要时应重新校准。
+权重路径为 `online_advantage.value_model.*`；加载时自动兼容旧的
+`online_advantage.critic.value_model.*` 路径，独立价值模型的 `critic.pt` 格式保持不变。
 
 部署时 `predict_action` 默认固定使用 `Advantage: positive`，不执行 critic；
 可选 negative/unconditional，`enabled: false` 则不附加优势条件。
@@ -283,7 +296,7 @@ NO_ALBUMENTATIONS_UPDATE=1 torchrun --standalone --nproc_per_node=2 \
 ```
 
 单元测试使用真实 Parquet 表和小型编码器夹具，通过原有 Dataset 工厂和混合 Dataset，
-运行实际的样本打包入口、Value Head、训练、checkpoint 和标签读取代码；覆盖默认 VLA 字段、
+运行实际的样本打包入口、Value Head、在线策略训练、checkpoint 和校准导出代码；覆盖默认 VLA 字段、
 可选帧信息、随机采样返回目标、多数据集逐帧覆盖、worker 加载及读取失败不重采样。
 分布式测试使用两进程 CPU/Gloo，检查完整保存、精确恢复与验证去重。
 这些测试不覆盖真实 Qwen 的多 GPU 或 DeepSpeed CUDA 执行。

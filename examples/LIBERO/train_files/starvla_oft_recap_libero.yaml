@@ -1,4 +1,4 @@
-# Advantage-conditioned OFT policy: offline labels by default, optional online critic.
+# Advantage-conditioned OFT policy: compute advantages online during VLA training.
 run_id: starvla
 run_root_dir: playground/Checkpoints
 seed: 42
@@ -19,11 +19,9 @@ framework:
     action_model_type: MLP
   advantage_conditioning:
     enabled: true  # false: ordinary OFT training without advantage labels or critic.
-    source: offline  # offline: sidecar/parquet; online: compute from critic each batch.
     freeze_critic: true  # online only; false adds supervised value_loss to policy training.
     value_loss_weight: 1.0
     dropout_probability: 0.3
-    sft_positive: false
     inference_condition: positive
 recap:
   name: QwenRecap
@@ -39,15 +37,10 @@ recap:
   advantage:
     mode: posttrain
     n_steps: 50
-    positive_fraction: null
-    dropout_probability: 0.3
-    prediction_batch_size: 8
-    thresholds: {}
-    task_thresholds: {}  # Online: "dataset_name:task_id": calibrated epsilon (see labeling/config.yaml).
+    task_thresholds: {}  # "dataset_name:task_id": calibrated threshold used during online training.
   # Explicit outcomes; unknown or truncated episodes must not be treated as successes.
   data:
     success_source: all_success  # manifest | column | all_success (known successful demos only)
-    outcome_path: meta/recap_episodes.jsonl
     success_column: success
     task_column: task_index
     truncated_column: null
@@ -74,8 +67,6 @@ recap:
     gradient_checkpointing: true
     mixed_precision: bf16
     resume_from_checkpoint: null  # Checkpoint directory; restores complete training state.
-  labeling:
-    output_dir: playground/Checkpoints/recap_labels
 datasets:
   vlm_data:
     dataset_py: vlm_datasets
@@ -100,7 +91,6 @@ datasets:
         sampling_mode: sequential
         transform_mode: eval
         delete_pause_frame: false
-        advantage_labels: {source: none}
         value_target_config:
           data: ${recap.data}
           reward: ${recap.reward}
@@ -120,10 +110,6 @@ datasets:
     per_device_batch_size: 16
     load_all_data_for_training: true
     video_backend: pyav
-    # One label file per dataset; missing labels fail instead of resampling.
-    advantage_labels:
-      source: sidecar  # parquet: read existing label columns; none: legacy/SFT.
-      path: meta/advantage_labels.jsonl
 trainer:
   max_train_steps: 100000 # Total number of training steps
   num_warmup_steps: 5000 # Warmup steps for learning rate scheduler
