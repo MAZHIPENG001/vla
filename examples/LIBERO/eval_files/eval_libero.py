@@ -170,7 +170,7 @@ def eval_libero(args: Args) -> None:
                         observation["observation.wrist_image"][0],
                     ],
                     "lang": observation["instruction"][0],
-                    "state": observation["observation.state"][0],
+                    "state": observation["observation.state"],
                 }
 
                 start_time = time.time()
