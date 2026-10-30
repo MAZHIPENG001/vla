@@ -129,7 +129,7 @@ modelscope download \
 Edit the checkpoint path in `examples/LIBERO/eval_files/run_policy_server.sh`:
 ```bash
 CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-OFT-LIBERO-4in1/checkpoints/steps_50000_pytorch_model.pt
-bash examples/LIBERO/eval_files/run_policy_server.sh
+TRANSFORMERS_VERBOSITY=error bash examples/LIBERO/eval_files/run_policy_server.sh
 ```
 ### Step 3: Run evaluation (Terminal 2 — LIBERO env)
 Edit the paths in examples/LIBERO/eval_files/eval_libero.sh, then:
