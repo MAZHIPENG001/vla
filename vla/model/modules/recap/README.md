@@ -1,327 +1,568 @@
-# π*0.6 / RECAP 优势条件
+# π*0.6 / RECAP：价值模型与优势条件策略
 
-依据仓库中的 `docs/pistar06.pdf`：第 IV-A、IV-B、V-B、V-C 节和附录 F。
-本模块包含基于 `Qwen/Qwen3-VL-2B-Instruct` 的价值模型，以及优势和 VLA 条件文本的计算。
-价值模型复用 `vla/model/modules/vlm/Qwen.py` 的加载、图像预处理和对话模板接口。
-PDF 第 V-C 节描述的原始价值模型骨干为 **670M**；这里按需求改用 Qwen3-VL 2B。
-提供可反向传播的价值训练损失，以及 vla/training 下的通用价值训练和离线标注入口；两者共用外部任务 YAML。
+本模块参考仓库中的 [π*0.6 论文](../../../../docs/pistar06.pdf)（IV-A、IV-B、V-B、V-C 节及附录 F），
+实现 Qwen 价值模型、优势估计和优势条件文本，并接入 `QwenOFTRecap` 策略。
+价值骨干采用 `Qwen/Qwen3-VL-2B-Instruct`，复用项目 Qwen 的加载、图像预处理、对话模板和特征接口。
+策略沿用 OFT 的连续动作 MLP 与 L1 loss；当前实现不包含论文的 flow matching、子任务生成训练或 CFG 动作混合。
 
-## 与 QwenOFT 一致的配置和批输入接口
+完整使用流程：
 
-`recap.py` 的 `QwenRecapDefaultConfig` + `QwenRecap` 参照 `QwenOFT.py` 组织：
-使用独立的顶层 `recap` 节点合并默认值与 YAML，通过 `get_vlm_model` 实际加载 Qwen，
-读取真实隐藏维度，并以 `examples: list[dict]` 作为训练和预测接口。
-各环境的配置放在 `examples/<环境>/train_files/`，例如 `examples/LIBERO/train_files/starvla_cotrain_libero.yaml`，
-RECAP 模块内不再保存独立 YAML。接口支持任务 YAML 路径、普通 dict 或 OmegaConf。
-`framework` 保留给 VLA 策略；`recap` 配置独立的价值模型和优势计算。
-该任务 YAML 同时包含 `framework`、`recap`、`datasets` 和 `trainer`，由策略和价值模型共同读取。
-RECAP 在内部生成一份适配 Qwen 工厂的局部配置，不改写调用方的 `framework`，
-也不会用策略的模型路径初始化价值模型。
-这是可组合的价值/优势模块，直接用 `QwenRecap(cfg)` 创建；不注册为返回动作的
-`build_framework` 策略，也不将 `value_loss` 命名为 `action_loss`。
+1. 用完整轨迹的归一化剩余回报独立训练 critic，得到 `critic.pt`。
+2. 在代表性数据上校准每个任务的优势阈值，写入共享任务 YAML。
+3. 加载并冻结 critic，在 VLA 训练的每个 batch 中即时计算优势条件，只优化动作损失。
+   部署默认固定使用 `Advantage: positive`，不执行 critic。
 
-| 配置项 | 默认值 | 作用 |
+这里的“在线”指训练时重算**已录制轨迹**的优势，不包含环境交互或 rollout 采集。
+离线标签导出用于检查和校准，VLA 训练不读取这些标签。
+
+本文包含：
+
+- [配置与代码入口](#配置与代码入口)
+- [价值模型与计算约定](#价值模型与计算约定)
+- [数据集与奖励准备](#数据集与奖励准备)
+- [独立价值训练与恢复](#独立价值训练与恢复)
+- [优势检查与阈值校准](#优势检查与阈值校准)
+- [VLA 在线训练与部署](#vla-在线训练与部署)
+- [Python 接口](#python-接口)
+- [验证入口](#验证入口)
+
+## 配置与代码入口
+
+策略、价值训练和阈值校准共用环境对应的任务 YAML。本文使用
+[`examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`](../../../../examples/LIBERO/train_files/starvla_oft_recap_libero.yaml)。
+其他环境可在 `examples/<环境>/train_files/` 提供自己的配置，数据格式仍需适配已有 Dataset 工厂。
+
+| 配置节点 | 用途 |
+| --- | --- |
+| `framework` | VLA 策略骨干、动作头和 `advantage_conditioning` |
+| `recap.qwenvl` / `recap.value_model` | 独立 critic 骨干、价值头和权重 |
+| `recap.data` / `recap.reward` | 轨迹结果、任务标识和奖励尺度 |
+| `recap.advantage` | 优势公式、预测批大小和校准阈值 |
+| `recap.training` | 独立价值训练参数 |
+| `datasets.vla_data` | 共用数据路径、混合数据集与加载参数 |
+| `trainer` | VLA 策略训练参数，与 `recap.training` 独立 |
+
+`QwenRecap` 接受任务 YAML 路径、普通 dict 或 OmegaConf，合并 `QwenRecapDefaultConfig`，
+保留完整配置副本。价值模型内部适配 Qwen 工厂需要的配置，不改写调用方的 `framework`，
+也不会用策略的权重路径初始化 critic。价值头输入维度从实际骨干读取。
+`QwenRecap` 直接实例化；`build_framework` 用于创建返回动作的 `QwenOFTRecap` 策略。
+
+| 代码 | 作用 |
+| --- | --- |
+| [`recap.py`](recap.py) | `QwenRecap` 配置、价值训练／预测、在线优势与条件生成 |
+| [`value_model.py`](value_model.py) | `QwenValueModel`、价值分类头与 MC return 损失 |
+| [`advantage.py`](advantage.py) | `AdvantageModule`、`AdvantageCondition` 及张量计算 |
+| [`QwenOFTRecap.py`](../../framework/VLM4A/QwenOFTRecap.py) | 优势条件策略，注册名 `QwenOFTRecap` |
+| [`vla/dataloader/__init__.py`](../../../dataloader/__init__.py) | 策略与价值流程共用的 `build_dataloader` |
+| [`recap_targets.py`](../../../dataloader/recap_targets.py) | 完整轨迹验证、标量 Reward/Return 和 bootstrap 索引 |
+| [`train_recap_value.py`](../../../training/train_recap_value.py) | 独立价值训练、验证与恢复 |
+| [`label_recap_advantages.py`](../../../training/label_recap_advantages.py) | 优势检查、标签导出与阈值校准 |
+| [`recap_utils.py`](../../../training/recap_utils.py) | 两个 CLI 的配置、checkpoint 与来源校验 |
+
+以下是 `QwenRecapDefaultConfig` 的主要默认值，实际以任务 YAML 的覆盖结果为准：
+
+| 配置项（省略 `recap.`） | 默认值 | 说明 |
 | --- | --- | --- |
-| `recap.qwenvl.base_vlm` | `Qwen/Qwen3-VL-2B-Instruct` | Hub ID 或完整本地权重目录 |
-| `recap.qwenvl.attn_implementation` | `sdpa` | 注意力实现 |
-| `recap.value_model.num_bins` | `201` | 价值分类档数 |
-| `recap.value_model.value_min/value_max` | `-1/0` | 归一化价值范围 |
-| `recap.value_model.freeze_backbone` | `true` | 是否仅训练价值头 |
-| `recap.value_model.checkpoint` | `null` | 训练好的价值模型 state_dict 路径 |
-| `recap.advantage.mode` | `posttrain` | 优势估计公式 |
-| `recap.advantage.n_steps` | `50` | 后训练前瞻步数 |
-| `recap.advantage.positive_fraction` | `null` | 自动按阶段选择 30% / 40% |
-| `recap.advantage.dropout_probability` | `0.3` | 训练时的条件丢弃概率 |
-| `recap.advantage.prediction_batch_size` | `8` | 轨迹标注时每批观测数 |
-| `recap.advantage.thresholds` | `{}` | 各任务已校准的阈值 |
-| `datasets.vla_data.obs_image_size` | 从共享配置读取，可省略 | 训练、预测共用的图像大小，宽/高 |
+| `qwenvl.base_vlm` | `Qwen/Qwen3-VL-2B-Instruct` | Hub ID 或完整本地权重目录 |
+| `qwenvl.attn_implementation` | `sdpa` | 注意力实现 |
+| `value_model.num_bins` | `201` | 价值分类档数 |
+| `value_model.value_min/value_max` | `-1/0` | 价值支持范围 |
+| `value_model.freeze_backbone` | `true` | 独立训练时仅更新价值头 |
+| `value_model.checkpoint` | `null` | 完整 `QwenValueModel.state_dict()` 路径 |
+| `advantage.mode` | `posttrain` | `posttrain` / `pretrain` / `return_to_go` |
+| `advantage.n_steps` | `50` | posttrain 前瞻步数 |
+| `advantage.positive_fraction` | `null` | 按模式选择目标正样本比例 |
+| `advantage.dropout_probability` | `0.3` | 独立优势接口的条件丢弃概率 |
+| `advantage.prediction_batch_size` | `8` | 价值预测每批观测数 |
+| `advantage.thresholds` | `{}` | Python 张量接口使用的整数任务 ID → 阈值 |
+| `advantage.task_thresholds` | `{}` | 在线 VLA 使用的稳定任务键 → 阈值 |
 
-同一份配置可同时创建策略和 RECAP，例如：
+`task_thresholds` 的键为 `数据集目录名:原始 task_index`，避免混合数据集重排整数任务 ID 后错配。
+`fit_thresholds` 保存的是 `thresholds`；校准 CLI 会同时生成 `task_thresholds`。
+在线策略的 dropout 由 `framework.advantage_conditioning.dropout_probability` 控制。
+`datasets.vla_data.obs_image_size` 可省略；设置后 `QwenRecap` 的训练和预测都会按 `[宽, 高]` 调整图像。
+
+## 价值模型与计算约定
+
+critic 编码当前时刻的多相机图像、任务指令和可选状态，取最后一个有效 token 的隐藏状态，
+通过新建线性头输出价值 logits。特征接口跳过词表 logits，默认关闭 KV cache。
+标量预测为分类分布的期望：
+
+```text
+V(o_t) = sum_b softmax(logits_t)[b] * bin_value[b]
+R_t    = sum_{k=t}^{L-1} r_k
+value_loss = CE(logits_t, nearest_bin(R_t))
+```
+
+默认使用 `[-1, 0]` 上的 201 个等距支撑点。**新建价值头随机初始化，Instruct 权重本身不是训练好的 critic。**
+独立价值训练始终以剩余回报 `R_t` 监督，不随优势模式改变；超出支持范围或非有限标签会报错，不做裁剪。
+默认冻结整个 Qwen 主干（视觉和语言部分），仅更新价值头；设置 `freeze_backbone: false` 可连同主干一起训练。
+`recap.training.mixed_precision: 'no'` 使用 float32 骨干，默认 `bf16` 使用 bfloat16 骨干。
+
+优势模式如下，`L` 为包含终止奖励的有效轨迹长度：
+
+| 模式 | 公式 |
+| --- | --- |
+| `posttrain` | `A_t = sum(r[t:min(t+N,L)]) + V(o[t+N]) - V(o[t])`，默认 `N=50` |
+| `pretrain` | `A_t = sum(r[0:L]) - V(o[t])` |
+| `return_to_go` | `A_t = sum(r[t:L]) - V(o[t])` |
+
+`posttrain` 在 `t+N >= L` 时令 bootstrap 为 0；终止样本自身的 `V(o_t)` 仍由 critic 预测。
+`pretrain` 按附录 F 的印刷公式使用整条轨迹回报，其与文中 `N=T` 描述存在歧义；
+需要从当前时刻累计的 MC 优势时，显式使用 `return_to_go`。
+
+条件采用严格比较 `I_t = (A_t > ε_task)`，人工接管帧强制为 positive。
+阈值按有效优势的 `1 - positive_fraction` 分位数估计：`posttrain` 默认目标 40% 正样本，
+`pretrain` 和 `return_to_go` 默认 30%；可显式设为 10% 等比例。
+相同优势值会使实际比例偏离目标；人工接管也可能提高正样本比例。
+本实现采用附录 F 的优势正样本比例约定。
+
+训练时以默认 30% 概率移除整个条件文本，保留原始正负标签；这也适用于人工接管帧。
+`eval()` 关闭条件 dropout。优势与标签计算均停止梯度，半精度奖励至少以 float32 累计。
+
+张量接口的 `rewards/values` 形状均为 `[B, T]`，每行是一条完整轨迹，
+`lengths` 指定包含终止样本的有效长度，右侧 padding 被忽略。
+不能将跨轨迹拼接数据或需要末端 bootstrap 的截断片段当作完整轨迹传入。
+奖励、价值和 critic 训练回报必须使用相同归一化尺度。
+
+## 数据集与奖励准备
+
+### 共用 Dataset 与 Value profile
+
+两类训练复用 `build_dataloader → get_vla_dataset → LeRobotMixtureDataset` 和单数据集的 `get_sample`，
+图像解码、变换、state/action 打包沿用原有路径。`recap_targets.py` 只缓存标量轨迹目标，
+不提供独立 Dataset 或观测解码器。
+
+普通 VLA 数据配置可以按需开启：
 
 ```yaml
-framework:
-  name: QwenOFT
-  qwenvl:
-    base_vlm: Qwen/Qwen3-VL-4B-Instruct
-    attn_implementation: sdpa
-  action_model:
-    action_horizon: 8
-    action_dim: 7
-
-recap:
-  name: QwenRecap
-  qwenvl:
-    base_vlm: Qwen/Qwen3-VL-2B-Instruct
-    attn_implementation: sdpa
-  value_model:
-    num_bins: 201
-  advantage:
-    n_steps: 50
-
 datasets:
   vla_data:
-    obs_image_size: [224, 224]
+    return_frame_info: true      # 附加 dataset_name/episode_index/frame_index/episode_length
+    return_value_targets: false  # 开启后附加 reward/return/task_key/is_intervention
 ```
 
-```python
-from omegaconf import OmegaConf
-from vla.model.framework.base_framework import build_framework
-from vla.model.modules.recap import QwenRecap
+两个开关默认均为 false。单独开启 `return_frame_info` 不需要结果清单，也不改变随机混合采样。
+开启 `return_value_targets` 需要 `value_target_config`；也可在随机 VLA 样本中返回回报监督。
 
-cfg = OmegaConf.load("examples/LIBERO/train_files/starvla_cotrain_libero.yaml")
-policy = build_framework(cfg)
-recap = QwenRecap(cfg)
+共享 YAML 的 `profiles.value` 为价值流程覆盖加载配置：
+
+```yaml
+datasets:
+  vla_data:
+    profiles:
+      value:
+        return_frame_info: true
+        return_value_targets: true
+        sampling_mode: sequential
+        transform_mode: eval
+        delete_pause_frame: false
+        value_target_config:
+          data: ${recap.data}
+          reward: ${recap.reward}
+          value_model:
+            value_min: ${recap.value_model.value_min}
+            value_max: ${recap.value_model.value_max}
+        per_device_batch_size: ${recap.training.batch_size}
+        num_workers: ${recap.training.num_workers}
+        shuffle: true
+        pin_memory: false
+        save_statistics: false
 ```
 
-旧版 RECAP 示例中 `framework` 下的 `qwenvl/value_model/advantage` 应迁移到 `recap`，
-策略原有的 `framework` 节点保留。运行时价值头维度与阈值写入 `recap.config.recap`；
-`recap.config` 保留完整的共享配置副本，可以一并保存策略和 RECAP 配置。
+Value 入口调用 `build_dataloader(cfg, dataset_py=..., profile="value")`，覆盖不修改原配置；
+两个 CLI 也会补充缺省的 Value profile。普通 VLA 不指定 profile，继续使用原有随机混合采样。
+`sequential` 使 Dataset 索引与原始帧一一对应，枚举所有帧，不使用策略删帧索引缓存；
+训练仍可在 DataLoader 层 shuffle，读取失败直接报错，不用其他随机帧替代。
+图像按需解码，变换使用 eval 模式。价值训练／验证按完整 Episode、按任务分组划分，
+使用标准 `torch.utils.data.Subset`，避免相邻帧泄漏。各训练帧均匀采样，不按策略混合器的权重抽样。
 
-```python
-from omegaconf import OmegaConf
-from vla.model.modules.recap import QwenRecap
+### 完整轨迹要求
 
-cfg = OmegaConf.load("examples/LIBERO/train_files/starvla_cotrain_libero.yaml")
-cfg.recap.qwenvl.base_vlm = "/home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct"
-recap = QwenRecap(cfg).to("cuda")
+每条轨迹的 `frame_index` 必须从 0 连续递增，且只包含一个由 `recap.data.task_column`
+标识的任务（默认 `task_index`）。最后一个存储帧必须对应终止样本；如果实际仍为终止前观测，
+需先对齐数据的终止语义或补齐终止观测。不同长度 Episode 独立累计回报。
 
-# batch 中每项包含：image（PIL/NumPy 图片或多相机图片列表）、lang（任务指令）、
-# return（归一化的剩余轨迹回报）；可选 state 为 [1, state_dim] 的已归一化状态。
-# 样例：{"image": [camera_image], "lang": "Close the box.", "return": -0.4}
-recap.train()
-loss = recap(batch)["value_loss"]
-loss.backward()
-# 实际训练循环还需 optimizer.step() 和梯度清零。
+`recap.data.truncated_column` 可指定布尔截断列，出现 true 就拒绝计算终止 MC 回报。
+输入的图像、状态和语言配置不能包含未来帧。原 Dataset 仍可返回动作字段，
+但 critic 只编码图像、语言和可选状态，不输入动作、成功标志、未来回报或优势标签。
+`recap.data.intervention_column` 可指定逐帧布尔接管列，未指定时全部视为无接管，指定后缺列会报错。
 
-recap.eval()
-values = recap.predict_value(batch)["values"]  # [观测数]，预测无需 return 标签
+### 奖励来源与归一化
 
-# episodes 为 list[list[example]]，每条仅放有效观测，包含终止样本。
-# rewards 为 [轨迹数, 最大步数] 的归一化奖励，右侧可以 padding。
-result = recap.predict_advantages(episodes, rewards)
-# task_ids: 与 result["advantages"] 同形状、同设备的整数任务编号。
-# 在代表性校准数据上拟合一次；不要在每个策略 minibatch 上重新拟合。
-recap.fit_thresholds(result["advantages"], task_ids, valid_mask=result["valid_mask"])
-condition = recap.make_condition(
-    result["advantages"], task_ids, valid_mask=result["valid_mask"],
-    intervention_mask=intervention_mask,  # 同形状 bool，人类纠正的位置
-)
-texts = condition.to_text()
+`recap.reward.source` 支持：
+
+| 来源 | 奖励及所需配置 |
+| --- | --- |
+| `episode`（默认） | 非终止帧 -1；成功终止帧 0；失败终止帧 `-failure_penalty`。要求正的 `failure_penalty` 和 `normalization` |
+| `column` | 读取 `recap.reward.column`，默认 `next.reward`。要求奖励与当前帧对齐及正的 `normalization`；不需要成功清单或失败惩罚 |
+
+`episode` 模式通过 `recap.data.success_source` 选择结果来源：
+
+- `manifest`：读取各数据集下的 `recap.data.outcome_path`，默认 `meta/recap_episodes.jsonl`。
+- `column`：读取每条轨迹最后一行的 `recap.data.success_column`（默认 `success`），值必须为布尔类型。
+- `all_success`：显式声明所有轨迹均为已确认完整且成功的示范，无需结果文件。
+
+只有 `reward.source: episode` 且 `success_source: manifest` 才读取结果清单。
+清单中每条轨迹恰好一行，`complete` 必须为 true；未知、缺失或重复轨迹会报错：
+
+```jsonl
+{"episode_index": 0, "success": true, "complete": true}
+{"episode_index": 1, "success": false, "complete": true}
 ```
 
-`recap.train()` / `recap.eval()` 控制条件 dropout；预测价值始终临时使用 eval 模式。
-`fit_thresholds` 写入 `recap.config.recap.advantage.thresholds`，可通过
-`OmegaConf.save(recap.config, "calibrated.yaml")` 保存后复用。
-用 `torch.save(recap.value_model.state_dict(), "critic.pt")` 保存完整价值模型，
-然后将 `recap.value_model.checkpoint` 设为此文件路径即可严格恢复权重；
-档数和价值范围需与训练时一致。
+奖励统一除以固定的 `normalization`，然后从轨迹尾部累计 Return，不能按 Episode 长度临时缩放。
+`recap.reward.task_overrides` 支持 `"数据集名:task_index"` 对应的任务专用 `failure_penalty/normalization`。
+长度为 `L` 的失败轨迹初始回报为 `-(L - 1 + failure_penalty) / normalization`。
+训练、校准和在线策略必须保持尺度一致；Return 超出 `value_min/value_max` 时应调整固定尺度或支持范围。
 
-### 实际权重加载测试
+CLI 缺省的 `failure_penalty/normalization` 都是 null，需要自行填写。
+本文的 LIBERO YAML 已设 `success_source: all_success`、`failure_penalty: 500` 和 `normalization: 999`；
+这些是该配置的取值，不是论文统一参数，仍需确认适用于实际数据。
 
-在仓库根目录先将项目可编辑安装到运行环境（每个环境只需执行一次），再按文件路径启动：
+## 独立价值训练与恢复
+
+### 配置与启动
+
+从仓库根目录执行，先准备项目依赖并在运行环境中进行可编辑安装：
 
 ```bash
 uv pip install --python .venv/bin/python -e .
-uv run vla/model/modules/recap/recap.py
 ```
 
-可编辑安装让运行环境能找到 `vla`、`deployment` 等项目包；入口使用绝对导入，
-无需在代码中修改 `sys.path`。修改源码后无需重新安装。
+安装后可按模块路径运行入口，无需修改 `sys.path`；修改源码无需重新安装。
+先在共享 YAML 中设置模型路径、`datasets.vla_data.data_root_dir/data_mix`、奖励配置和训练参数。
+独立价值训练使用自己的循环，分布式、梯度累积和状态保存交给 Accelerate。
 
-在仓库根目录运行下列命令。该入口真实加载本地 2B 权重和处理器，测试两个不同长度指令、
-可选状态、价值损失、反向梯度、价值预测、轨迹优势和条件文本生成：
+| `recap.training` 参数 | CLI 缺省值 | 含义 |
+| --- | --- | --- |
+| `output_dir` | `playground/Checkpoints/recap_value` | 输出目录 |
+| `batch_size` / `num_workers` | `2` / `0` | 每 rank micro batch 与加载进程数 |
+| `gradient_accumulation_steps` | `4` | 梯度累积次数 |
+| `max_steps` | `10000` | 优化器更新总次数 |
+| `learning_rate` / `weight_decay` | `1e-5` / `0.01` | AdamW 参数，学习率保持常量 |
+| `max_grad_norm` | `1.0` | 梯度裁剪 |
+| `validation_fraction` | `0.1` | 按任务划分的验证 Episode 比例 |
+| `eval_interval` / `save_interval` | `500` / `1000` | 验证／保存的更新步间隔 |
+| `logging_steps` | `10` | 控制台打印间隔，指标文件每步写入 |
+| `gradient_checkpointing` | `true` | 训练主干时启用梯度检查点 |
+| `mixed_precision` | `bf16` | 支持 `bf16` 或 `'no'`（float32） |
+| `resume_from_checkpoint` | `null` | 完整训练状态所在目录 |
+
+任务 YAML 可覆盖这些默认值：当前 LIBERO 示例使用 `batch_size: 16`、`logging_steps: 1`，
+输出目录为小写的 **`playground/checkpoints/recap_value`**，下文训练产物路径均与它一致。
+全局名义 batch 为 `batch_size × gradient_accumulation_steps × world_size`。
+梯度累积可跨 DataLoader epoch，不因 epoch 尾批提前更新。
+每任务仅一条轨迹时保留在训练集；若所有任务均无法划出独立验证轨迹则报错，
+可显式设置 `validation_fraction: 0` 关闭验证。
 
 ```bash
-HF_HUB_OFFLINE=1 uv run vla/model/modules/recap/recap.py \
-  --config_yaml examples/LIBERO/train_files/starvla_cotrain_libero.yaml \
-  --model_id /home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct \
-  --device cpu --freeze_backbone --backward
+# 检查轨迹元数据、结果和 Return，不加载 Qwen、不逐帧解码视频
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --check_data
+
+# 单卡训练
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
+
+# 短训练，使用独立输出目录
+NO_ALBUMENTATIONS_UPDATE=1 uv run --no-sync python -m vla.training.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda \
+  --set recap.training.max_steps=200 \
+        recap.training.batch_size=2 \
+        recap.training.logging_steps=1 \
+        recap.training.save_interval=50 \
+        recap.training.output_dir=playground/checkpoints/recap_value_smoke
 ```
 
-CPU 测试冻结骨干并对价值头反向传播；小规模 Qwen 单元测试另外覆盖骨干梯度。
-省略 `--config_yaml` 时，入口默认加载上述 LIBERO 任务配置。
-如需在 GPU 验证完整反向传播，在 YAML 中设置 `recap.value_model.freeze_backbone: false`，
-再使用 `--device cuda --backward`。
-`--checkpoint /path/to/critic.pt` 可测试加载训练后的价值模型。
-不传 `--model_id` 时使用 YAML 指定的 Hub ID；加载远程模型时不要设置 `HF_HUB_OFFLINE=1`。
-测试使用合成图片和标签，只验证代码链路，不代表新价值头已经学会任务价值。
+CPU 训练使用 `--device cpu --set 'recap.training.mixed_precision="no"'`，
+其中内层双引号用于让 OmegaConf 将 `no` 解析为字符串。
+底层数据读取需要 Parquet 引擎（如 pyarrow）和配置的视频解码后端（LIBERO 示例使用 pyav）。
+`--check_data` 不能替代真实图像解码检查。
 
-## Qwen3-VL 2B 价值模型
+支持 torchrun DDP 和已有 DeepSpeed 配置；以下命令在已激活项目运行环境时执行：
 
-`QwenValueModel` 默认加载模型 ID `Qwen/Qwen3-VL-2B-Instruct`，也接受本地完整权重目录。
-模型定义可参考 [Qwen 官方模型页](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct)。
-它对当前观测的多相机图片和任务指令编码，取最后一个有效 token 的隐藏状态，
-通过新建的线性层输出 201 档价值 logits，再求期望得到标量价值。
-特征接口跳过词表 logits 的计算，默认关闭 KV cache。
+```bash
+# 两卡 DDP，GPU 通过 CUDA_VISIBLE_DEVICES 选择
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+  -m vla.training.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml
 
-**新建价值头是随机初始化的，必须先用任务轨迹回报训练，才能用于可靠的优势标注。**
-默认冻结 Qwen 主干、仅训练价值头；将 `recap.value_model.freeze_backbone` 设为 `false` 可联合训练。
-价值监督始终是归一化的剩余回报 `R_t = Σ_{k=t}^{L-1}r_k`，与优势模式中的
-`pretrain` / `return_to_go` 选择无关。将连续回报量化到最近 bin 后计算交叉熵。
-超出价值范围的标签会报错，需检查任务归一化或显式设置 `value_min` / `value_max`。
+# Accelerate + DeepSpeed ZeRO-2
+accelerate launch --config_file vla/config/deepseeds/zero2.yaml --num_processes 2 \
+  -m vla.training.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml
+```
+
+也可使用 `vla/config/deepseeds/deepspeed_zero3.yaml`。入口统一从训练 YAML 设置 batch、累积和 clipping，
+启用 ZeRO-3 完整权重聚合。所有 rank 必须参与 checkpoint 保存，包含冻结主干的完整 critic 才能导出。
+多机运行按 Accelerate 的启动配置设置，各 rank 使用共享输出路径。
+两个 CLI 均支持 `--model_id` 覆盖 critic 骨干、`--checkpoint` 指定权重和 `--set KEY=VALUE ...` 临时覆盖配置；
+这些参数不会替换 `framework` 下的策略骨干。
+
+### 产物与断点续训
+
+```text
+playground/checkpoints/recap_value/
+  config.yaml
+  split.json
+  metrics.jsonl
+  step_0001000/
+    ...                       # 与 final 的文件结构一致
+  final/
+    critic.pt                 # 完整 Qwen 主干、Value Head、float32 bins
+    training_state/           # Accelerate/DeepSpeed 模型、优化器、各 rank RNG、采样器状态
+    progress.json             # step、epoch、已消费 batch 数、恢复约定
+    metadata.json             # 完成步数、奖励／输入约定、Episode 划分
+    config.yaml               # 完整共享配置，checkpoint 指向此 critic.pt
+```
+
+根目录 `split.json` 保存训练／验证划分。
+`metrics.jsonl` 每步记录 `train_*` 指标，验证时增加 `validation_*`：
+`value_loss`、`value_mae`、`value_mse`、`predicted_value`（预测均值）、`true_return`（目标均值）。
+训练指标聚合全部 rank；验证用 `gather_for_metrics` 排除多卡 batch 补齐产生的重复样本。
+
+checkpoint 先写隐藏的 `.incomplete` 临时目录，全部 rank 保存完成后原子发布。
+已有 checkpoint 不覆盖；新训练遇到已有输出目录会报错，显式恢复可继续写入划分一致的原目录。
+
+```bash
+.venv/bin/python -m vla.training.train_recap_value \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml \
+  --resume_from_checkpoint playground/checkpoints/recap_value/step_0001000 \
+  --set recap.training.max_steps=20000
+```
+
+多卡恢复使用原启动命令并附加相同恢复参数。
+恢复会重建确定性的 Episode 划分与采样顺序，跳过已消费 batch，再恢复模型、优化器和各 rank 随机状态。
+要求原有数据、数据配置、随机种子、world size、batch、累积步数、冻结策略、精度及优化超参数一致；
+可增加目标总步数 `max_steps`、修改日志／保存频率或使用新的输出目录。
+从已有 `final` 继续时保留旧终态，新终态写到 `final_step_XXXXXXX/`。
+
+`--checkpoint /path/to/critic.pt` 是热启动，只加载权重，重新创建优化器和步数。
+训练 CLI 的热启动及校准 CLI 都要求同目录的 `metadata.json`，并校验奖励尺度、价值支持范围、
+骨干与观测约定；单独的 Instruct 权重不能用于替代已训练 critic。
+
+## 优势检查与阈值校准
+
+训练策略必须提供明确的任务阈值。可自行在代表性数据上校准，也可使用
+`label_recap_advantages` 完成检查和校准。该工具单进程按 Episode 分批解码／预测，
+内存中只保留各轨迹的数值数组，不保留整条轨迹图像。
+任务 YAML 和共享默认配置不包含 `labeling` 节点，导出选项按调用需求指定：
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.label_recap_advantages \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml \
+  --checkpoint playground/checkpoints/recap_value/final/critic.pt --device cuda \
+  --set recap.labeling.output_dir=/tmp/recap_inspection
+```
+
+权重选择顺序为：CLI `--checkpoint` 覆盖 YAML 的 `recap.value_model.checkpoint`；
+两者都未指定时，选择 `recap.training.output_dir` 下 `final*` 或 `step_*` 中 metadata 记录步数最大的 checkpoint。
+请保留权重旁的 `metadata.json` 供来源及配置校验。
+
+工具支持三种优势模式，轨迹末端 bootstrap 为 0。
+阈值在当前校准数据的全部有效帧上按任务统一拟合，不能用每个随机 batch 的分位数替代。
+校准数据应代表相应阶段的数据分布；工具不会自动挑选代表性子集。
+离线标签不做 dropout，人工接管帧强制 positive。
+
+| 产物 | 内容 |
+| --- | --- |
+| 各数据集的 `meta/advantage_labels.jsonl` | 逐帧正负标签与接管标记，仅供检查；可用 `recap.labeling.label_path` 修改相对路径 |
+| `labeling.output_dir/scores.jsonl` | dataset、episode、frame、task_key、reward、value、return、advantage、标签与接管标记 |
+| `labeling.output_dir/metadata.json` | critic 来源、训练步数、任务映射、阈值、实际正样本比例与标签路径 |
+| `labeling.output_dir/config.yaml` | 完整共享配置及 critic 路径、两类任务阈值 |
+
+`recap.labeling.output_dir` 缺省为 `playground/Checkpoints/recap_labels`。
+导出目录必须尚不存在；已有标签默认拒绝覆盖，显式传入 `--overwrite_labels` 才会原子替换逐个标签文件。
+新一轮导出需选择新的 output_dir。
+
+校准完成后，将导出配置中的 **`recap.value_model.checkpoint`** 和
+**`recap.advantage.task_thresholds`** 写回用于策略训练的任务 YAML。
+训练、校准及策略阶段的奖励和观测约定必须保持一致，建议将最终参数保存到共享 YAML。
+VLA 不读取 `advantage_labels.jsonl` 或 Parquet 中的预存优势标签。
+
+## VLA 在线训练与部署
+
+### 策略配置与训练
+
+```yaml
+framework:
+  name: QwenOFTRecap
+  advantage_conditioning:
+    enabled: true
+    freeze_critic: true
+    dropout_probability: 0.3
+    inference_condition: positive
+recap:
+  value_model:
+    checkpoint: /path/to/recap_value/final/critic.pt
+    freeze_backbone: true
+  advantage:
+    mode: posttrain
+    n_steps: 50
+    task_thresholds:
+      "your_dataset_name:0": 0.02  # 仅为格式示例，必须换成实际校准阈值
+```
+
+这是共享任务 YAML 的配置片段，还需保留策略／critic 模型路径、`datasets`、`recap.data/reward` 和训练配置。
+`enabled: false` 关闭优势条件，不加载 critic，执行普通 OFT 训练；
+`enabled: true` 时必须提供训练好的 critic、有限且覆盖所用任务的阈值，以及 `freeze_critic: true`。
+`freeze_backbone` 只控制独立价值训练时是否更新 Qwen 主干，策略训练始终冻结整个 critic 并保持其 eval。
+
+未指定 Value profile 的策略 DataLoader 会自动开启回报目标和在线优势字段，沿用原有随机混合采样。
+训练样本保留 `image/lang/state/action`，并附加 `reward`、`return`、`task_key`、`is_intervention`、
+`advantage_reward` 和 `advantage_bootstrap`。
+worker 准备归一化奖励目标和必要的后续观测；critic 在模型设备计算。
+bootstrap 观测只含图像、指令和可选状态，单独求值，不把未来动作或优势条件输入 critic。
+
+策略内部创建 `QwenRecap(config, online=True)`，调用 `recap(examples, online=True)` 获取
+`condition` 和 `advantages`，不产生 `value_loss`。提示输入顺序为：
+
+```text
+图像 + 完整任务提示／状态 → 可选 Subtask 文本 → Advantage 条件 → 动作查询
+```
+
+CoT_prompt 先展开，条件和动作查询后追加。条件只影响后面的动作查询；
+`subtask` 可选，若提供则必须是字符串。
+训练时正负标签经阈值比较后转为条件文本，按配置概率移除条件，学习无条件动作预测。
+策略的优化目标为 **`loss = action_loss`**，仍使用 OFT 的 L1 动作回归。
+优势不作为样本 loss 权重，也不直接加入损失；动作损失不沿此路径反传至 critic。
+日志增加 `advantage_mean`，critic 随策略 state_dict 保存。
+
+配置好路径、阈值和 WandB 等运行参数后，可使用现有策略训练器，例如：
+
+```bash
+accelerate launch --config_file vla/config/deepseeds/deepspeed_zero2.yaml --num_processes 2 \
+  vla/training/train_starvla.py \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml
+```
+
+`examples/LIBERO/train_files/run_libero_train.sh` 也可复用，但其中会覆盖 framework 名称和配置路径，
+需将 `Framework_name` 改为 `QwenOFTRecap`、`config_yaml` 指向 RECAP 任务配置，并调整机器相关参数。
+收集下一轮数据后，先重新训练 critic、重新校准阈值，再启动下一轮策略训练。
+
+### 部署与配置兼容
+
+`predict_action` 默认使用 `Advantage: positive`，可传 `advantage="negative"` 或 `"unconditional"`。
+`enabled: false` 则不附加条件。动作推理不执行 critic，但以在线配置创建策略实例时仍会构建和加载它；
+加载完整策略 checkpoint 不会取消这一初始化要求。
+
+旧配置需做以下迁移：
+
+- 早期放在 `framework` 下的 RECAP `qwenvl/value_model/advantage` 移至 `recap`，保留策略自己的 `framework`。
+- 删除 `framework.advantage_conditioning.source`、`sft_positive`、`value_loss_weight`，
+  以及 `datasets.vla_data.advantage_labels` 和不再使用的 `trainer.learning_rate.online_advantage`。
+- 开启条件时使用 `freeze_critic: true`，不再支持策略与 critic 的联合优化。
+
+策略训练不接受调用方指定 `advantage_condition` 或固定 `advantage`；条件由内部在线计算。
+策略 checkpoint 的 critic 权重路径为 `online_advantage.value_model.*`，加载时兼容旧的
+`online_advantage.critic.value_model.*`。独立 `critic.pt` 格式仍为 `QwenValueModel.state_dict()`。
+
+## Python 接口
+
+### 价值监督与预测
+
+`QwenRecap` 使用 `examples: list[dict]` 接口，每项包含多相机 `image`、`lang`，
+可选已归一化的 `state`（如 `[1, state_dim]`）。训练要求标量 `return`，预测无需标签。
+下面展示单次更新；真实使用需在轨迹数据上迭代训练和验证：
 
 ```python
 import torch
-from vla.model.modules.recap import AdvantageCondition, QwenValueModel
+from omegaconf import OmegaConf
+from PIL import Image
+from vla.model.modules.recap import QwenRecap
 
-critic = QwenValueModel().to("cuda")
-# 本地权重下载完整后也可使用：
-# critic = QwenValueModel(
-#     model_id="/home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct"
-# ).to("cuda")
-
-# batch_images: list[list[PIL.Image]]，每项是当前观测的多相机图片。
-# instructions: list[str]，每个观测对应的任务指令。
-# rewards: [B, T]，已经按与价值模型一致的尺度归一化。
-# lengths: [B]，包含终止奖励的有效轨迹长度。
-valid = torch.arange(rewards.shape[1], device=rewards.device)[None, :] < lengths[:, None]
-masked_rewards = rewards.masked_fill(~valid, 0)
-return_to_go = masked_rewards.flip(1).cumsum(1).flip(1)
-# batch_images / instructions 只包含 valid 为 True 的观测，按行优先排列。
-
-critic.train()
-optimizer = torch.optim.AdamW(critic.parameters(), lr=1e-5)
-optimizer.zero_grad()
-output = critic(batch_images, instructions, returns=return_to_go[valid])
-output.loss.backward()
+cfg = OmegaConf.load("examples/LIBERO/train_files/starvla_oft_recap_libero.yaml")
+recap = QwenRecap(cfg).to("cuda")
+batch = [{
+    "image": [Image.new("RGB", (224, 224))],
+    "lang": "Close the box.",
+    "return": -0.4,
+}]
+optimizer = torch.optim.AdamW(
+    [p for p in recap.parameters() if p.requires_grad], lr=1e-5,
+)
+recap.train()
+optimizer.zero_grad(set_to_none=True)
+output = recap(batch)
+output["value_loss"].backward()
 optimizer.step()
-# 上面展示单步接口；实际需要在轨迹数据集上迭代训练并验证价值模型。
-torch.save(critic.state_dict(), "critic.pt")  # 包含 Qwen、价值头和 bin 支撑点
 
-# 训练充分后，用该模型标注策略训练样本；大批量观测可分批预测再拼接。
-critic.eval()
-predictions = critic.predict_values(batch_images, instructions)
-values = torch.zeros(rewards.shape, device=predictions.device)
-values[valid.to(values.device)] = predictions
-advantages = AdvantageCondition.compute_advantages(rewards.to(values.device), values, lengths=lengths)
+recap.eval()
+values = recap.predict_value(batch)["values"]  # [观测数]
+torch.save(recap.value_model.state_dict(), "critic.pt")
+OmegaConf.save(recap.config, "recap_config.yaml")
 ```
 
-恢复模型时用相同的初始化参数创建 `QwenValueModel`，再调用
-`critic.load_state_dict(torch.load("critic.pt", map_location="cpu", weights_only=True))`。
-`predict_values` 自动关闭梯度并临时切换到评估模式，不会把价值模型梯度传入策略训练。
-它的输出可接入下方阈值估计和条件计算函数。
+普通 `forward` 返回 `value_loss`、逐样本 `value_losses`、`values` 和 `returns`。
+`predict_value` 临时使用 eval 并关闭梯度，结束后恢复先前模式。
+恢复时保持相同骨干、档数和支持范围，将 `recap.value_model.checkpoint` 设为权重路径。
+此处手工保存只有权重，不包含训练 CLI 要求的 metadata 或完整续训状态；
+需要后续 CLI 热启动、校准和断点续训时，应使用训练入口产出的 checkpoint。
 
-## 计算约定
+底层 `QwenValueModel` 也可使用，但需提供含 `recap.qwenvl` 的共享 `config`，
+并显式传入所需的 `num_bins/value_min/value_max/freeze_backbone`；不要依赖无参初始化。
+它接收 `images: list[list[PIL.Image]]`、`instructions: list[str]` 和可选 `[B]` 的 `returns`，
+返回 `ValueModelOutput(logits, values, loss, losses)`。状态转为文本和图像尺寸处理由 `QwenRecap` 包装层负责。
 
-- 分布价值：`AdvantageCondition.values_from_logits` 计算 `Σ softmax(logits)[b] * bin_value[b]`。
-  默认值域为 `[-1, 0]` 的等距支撑点；论文使用 201 个 bin，也可传入模型实际使用的支撑点。
-- 奖励：非终止步为 `-1`，成功终止为 `0`，失败终止为 `-C_fail`。
-  `failure_penalty` 必须显式指定；论文未给出统一数值。
-- 后训练：`A_t = Σ_{k=t}^{min(t+N,L)-1} r_k + V_{t+N} - V_t`，默认 `N=50`。
-  当 `t+N >= L` 时 bootstrap 为零。这里 `L` 是包含终止奖励的样本数。
-- 预训练：`mode="pretrain"` 按附录 F 的印刷公式使用整条轨迹回报 `Σ_{k=0}^{L-1}r_k - V_t`。
-  附录同时称其为 `N=T` 的估计，与从当前时刻起求和的常见定义存在歧义。
-  若采用剩余回报，应显式选择 `mode="return_to_go"`：`Σ_{k=t}^{L-1}r_k - V_t`。
-- 条件：`I_t = (A_t > ε_task)`，严格大于；人工纠正对应的动作强制为正。
-  训练时默认以 30% 的概率删除整个条件，保留原始标签，避免将无条件误当作负条件。
-- 阈值：按附录 F 的目标正样本比例估计优势的分位数。预训练默认 30%，后训练默认 40%，
-  部分折衣任务可设 10%。例如正样本比例 30% 对应 **优势的 70% 分位数**。
-  第 V-D 节也提到价值预测的 30% 分位数，本实现采用附录 F 的优势正样本比例约定。
-  相同优势值可能导致实际比例偏离目标，不通过随机打破平局更改严格比较规则。
+### 完整轨迹优势与独立张量接口
 
-`rewards` 和 `values` 的形状均为 `[batch, steps]`，每行必须是一条完整轨迹，
-最后一个有效样本携带终止奖励。`lengths` 指定每行有效样本数，右侧 padding 被忽略。
-不应把跨轨迹拼接数据或需要末端 bootstrap 的截断片段作为完整轨迹传入。
-所有标签计算均停止梯度，半精度输入至少以 float32 进行累计。
-
-奖励和价值必须使用相同尺度。`AdvantageCondition.episode_rewards(normalization=...)` 支持每条轨迹对应任务的
-归一化除数；应与价值模型训练时保持一致。函数不会裁剪回报，失败惩罚叠加步数后可能
-超出 `[-1, 0]`；应按实际训练约定选择归一化参数和价值支撑点，不能仅裁剪某一侧。
-
-## 使用示例
-
-`advantage.py` 提供独立的 `AdvantageModule(nn.Module)`，无需加载 Qwen 即可使用。
-`forward` 计算优势，`fit_thresholds` 标定并保存任务阈值，`make_condition` 生成条件。
-模块没有可训练参数，所有优势和标签计算均停止梯度；`train()` / `eval()` 控制条件 dropout。
+已有训练好的 `recap`、完整 `episodes: list[list[example]]` 和同尺度的 `[B, T]` 奖励时：
 
 ```python
-from vla.model.modules.recap import AdvantageModule
-
-advantage = AdvantageModule(mode="posttrain", n_steps=50, dropout_probability=0.3)
-scores = advantage(rewards, values, lengths=lengths)  # [B, T]
-thresholds = advantage.fit_thresholds(scores, task_ids, valid_mask=valid_mask)
-advantage.eval()
-condition = advantage.make_condition(scores, task_ids, valid_mask=valid_mask)
+# 每条 episode 仅包含有效观测，最后一项为终止样本；rewards 右侧允许 padding。
+result = recap.predict_advantages(episodes, rewards)
+# 返回 values/advantages/valid_mask: [B, T]，lengths: [B]。
+# task_ids 为同形状、同设备的整数任务编号。
+recap.fit_thresholds(result["advantages"], task_ids, valid_mask=result["valid_mask"])
+condition = recap.make_condition(
+    result["advantages"], task_ids, valid_mask=result["valid_mask"],
+    intervention_mask=intervention_mask,
+)
 texts = condition.to_text()
+OmegaConf.save(recap.config, "calibrated.yaml")
+```
 
-# 单独使用时，将 thresholds 随实验配置保存，恢复时传回构造函数。
+`fit_thresholds` 应在代表性校准数据上执行并保存，不在每个策略 minibatch 中重新拟合。
+`recap.train()/eval()` 控制条件 dropout，阈值保存到 `recap.config.recap.advantage.thresholds`。
+若用于在线 VLA，还需将整数任务 ID 映射为稳定任务键，写入 `task_thresholds`；校准 CLI 已完成此转换。
+
+只需要张量计算时，`AdvantageModule` 不加载 Qwen、没有可训练参数，提供
+`forward`、`fit_thresholds` 和 `make_condition`。以下示例可独立运行：
+
+```python
+import torch
+from vla.model.modules.recap import AdvantageCondition, AdvantageModule
+
+lengths = torch.tensor([4, 3])
+rewards = AdvantageCondition.episode_rewards(
+    lengths, torch.tensor([True, False]),
+    max_steps=4, failure_penalty=5, normalization=10,
+)
+# 仅用于演示，实际应替换为训练好的 critic 预测。
+values = AdvantageCondition.values_from_logits(torch.zeros(2, 4, 201))
+valid = torch.arange(4)[None, :] < lengths[:, None]
+task_ids = torch.tensor([0, 1])[:, None].expand_as(values)
+advantage = AdvantageModule(mode="posttrain", n_steps=50, dropout_probability=0.3)
+scores = advantage(rewards, values, lengths=lengths)
+# 此处用当前数据演示；真实训练应独立选择代表性校准数据。
+thresholds = advantage.fit_thresholds(scores, task_ids, valid_mask=valid)
+advantage.eval()
+condition = advantage.make_condition(scores, task_ids, valid_mask=valid)
+print(condition.indicator)          # bool [B, T]，原始正负标签
+print(condition.conditioning_mask)  # bool [B, T]，条件是否保留
+print(condition.to_text())          # 按行展平，padding 或被丢弃条件为 ""
 restored = AdvantageModule(thresholds=thresholds).eval()
 ```
 
-`QwenRecap` 通过 `recap.advantage` 组合该模块，其原有 `predict_advantages`、
-`fit_thresholds` 和 `make_condition` 接口继续可用。通过 `recap.fit_thresholds` 标定时，
-阈值同时写入共享配置，供 YAML 保存和恢复；离线标注入口也使用此模块计算优势。
-数值计算和校验函数均封装在 `AdvantageCondition` 中，文件不再提供独立函数。
-通过类方法调用，无需先创建条件对象；`compute_advantage_condition` 返回新的
-`AdvantageCondition`，保留 `indicator`、`conditioning_mask` 和 `to_text()` 接口：
+相同数值与校验逻辑也可通过 `AdvantageCondition` 类方法调用：`values_from_logits`、
+`episode_rewards`、`compute_advantages`、`estimate_task_thresholds`、`compute_advantage_condition`。
+后者返回包含 `indicator`、`conditioning_mask` 和 `to_text()` 的条件对象。
+`valid_mask` 仍需用于损失屏蔽；空条件文本本身不会屏蔽 padding 损失。
 
-```python
-import torch
-from vla.model.modules.recap import AdvantageCondition
+### 策略调用
 
-lengths = torch.tensor([4, 3])
-success = torch.tensor([True, False])
-rewards = AdvantageCondition.episode_rewards(
-    lengths, success, max_steps=4, failure_penalty=5, normalization=10,
-)
-# 实际使用时替换为价值模型对各时刻观测及任务指令的预测。
-value_logits = torch.zeros(2, 4, 201)
-values = AdvantageCondition.values_from_logits(value_logits)
-advantages = AdvantageCondition.compute_advantages(rewards, values, lengths=lengths)  # N=50
-valid = torch.arange(4)[None, :] < lengths[:, None]
-task_ids = torch.tensor([0, 1])[:, None].expand_as(advantages)
-
-# 示例为简洁起见使用当前数据；实际应先在独立的代表性校准数据上估计并保存阈值。
-# 预训练使用示范数据（论文抽样 10k 点），后训练使用当前迭代的评估 rollout。
-thresholds = AdvantageCondition.estimate_task_thresholds(
-    advantages, task_ids, stage="posttrain", valid_mask=valid,
-)
-condition = AdvantageCondition.compute_advantage_condition(
-    advantages, task_ids, thresholds, valid_mask=valid,
-    intervention_mask=torch.zeros_like(valid),
-    training=True, generator=torch.Generator().manual_seed(42),
-)
-print(condition.indicator)           # bool [2, 4]，原始正/负标签
-print(condition.conditioning_mask)   # bool [2, 4]，条件是否保留
-print(condition.to_text())           # 展平为 8 个字符串，丢弃或 padding 为 ""
-```
-
-将非空条件文本插入**子任务文本之后、动作 token 之前**，以使条件只影响动作预测。
-`valid_mask` 也应继续用于训练损失屏蔽；空条件字符串本身不会屏蔽 padding 的损失。
-部署时通常直接使用 `Advantage: positive`，无需在线计算价值或优势。
-示范 SFT 阶段若需按论文将全部示范标为正，可直接构造正条件。
-
-## 验证
-
-在仓库根目录运行：
-
-```bash
-.venv/bin/python -m unittest discover -s vla/model/modules/recap/tests -v
-```
-
-当前 `test_online_policy.py` 使用小型编码器替代 Qwen，验证在线优势的 bootstrap、
-终止窗口、人工纠正和条件 dropout，检查策略优化不更新 critic、独立价值训练仍可反传，
-以及旧联合训练配置在加载策略前报错。测试无需下载或加载 Qwen 权重。
-
-## Advantage 条件策略：QwenOFTRecap
-
-下一步策略已实现于 `vla/model/framework/VLM4A/QwenOFTRecap.py`，注册名称为
-`QwenOFTRecap`，继承原 `QwenOFT` 的动作查询、MLP 动作头、L1 loss 和预测接口。
-任务配置位于 `examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`：
-`framework` 配置策略，`recap` 配置独立价值模型，仍共用一份任务 YAML。
-开启优势条件后，策略在每个训练 batch 中使用已训练且冻结的 critic 即时计算条件，
-只优化条件化的动作损失。critic 通过 `train_recap_value` 独立训练。
-关闭优势条件则进行普通 OFT 训练。详见
-[VLA 在线计算与冻结选项](../../../../docs/value_training.md#vla-在线计算与冻结选项)。
-
-策略输入顺序为：图像 + 完整任务提示/状态 → 可选子任务文本 → Advantage 条件 → 动作查询。
-条件只影响后面的动作查询；CoT_prompt 模板先完成展开，条件和动作查询再追加。
-这里保留 OFT 的 L1 动作回归，不包含 flow matching、子任务生成训练或 CFG 动作混合。
-
-训练样本保留原来的 `image/lang/state/action` 字段；共享 DataLoader 自动增加当前帧的
-`return`、`task_key`、`is_intervention`、`advantage_reward` 和 `advantage_bootstrap`。
-bootstrap 观测只包含图像、指令及可选状态，不包含动作或优势标签。
-`subtask` 为可选文本，若有则放在 Advantage 之前。
+以下假设任务 YAML 已配置训练好的 critic 和校准阈值，`observations` 为部署观测列表：
 
 ```python
 from omegaconf import OmegaConf
@@ -329,224 +570,43 @@ from vla.dataloader import build_dataloader
 from vla.model.framework.base_framework import build_framework
 
 cfg = OmegaConf.load("examples/LIBERO/train_files/starvla_oft_recap_libero.yaml")
-# 先配置已训练的 recap.value_model.checkpoint 和 recap.advantage.task_thresholds。
 loader = build_dataloader(cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
 policy = build_framework(cfg).to("cuda")
 policy.train()
 output = policy(next(iter(loader)))
-output.get("loss", output["action_loss"]).backward()
+output["loss"].backward()
+# 实际训练还需 optimizer.step() 和梯度清零。
 
 policy.eval()
-actions = policy.predict_action(observations)["normalized_actions"]  # 默认正优势条件
+actions = policy.predict_action(observations)["normalized_actions"]
 negative = policy.predict_action(observations, advantage="negative")["normalized_actions"]
 unconditional = policy.predict_action(observations, advantage="unconditional")["normalized_actions"]
 ```
 
-在线逻辑直接集成在 `QwenRecap` 内：策略创建 `QwenRecap(config, online=True)`，
-调用 `recap(examples, online=True)` 获取 `condition`、`advantages`，不返回 `value_loss`。
-独立 critic 的普通 `recap(examples)` 仍执行价值监督训练，`predict_value` 仍返回预测价值。
-策略返回 `loss = action_loss`；优势通过条件文本影响动作预测，不作为额外损失或样本权重。
+## 验证入口
 
-`framework.advantage_conditioning` 包含：
-
-- `enabled: true`：在线计算优势；设为 false 时不添加条件、不加载 critic。
-- `freeze_critic: true`：策略训练时必须冻结整个 critic，并保持 critic 为 eval 模式。
-- `dropout_probability: 0.3`：训练时以 30% 概率删去条件文本。
-- `inference_condition: positive`：部署默认正优势，可选 negative/unconditional。
-
-训练不读取预存正负标签，不接受调用方传入 `advantage_condition` 或固定 `advantage`。
-旧配置中的 `source` 和 `sft_positive` 已移除，需要删除。
-旧配置还需删除 `value_loss_weight` 和 `trainer.learning_rate.online_advantage`；
-不再支持 `freeze_critic: false` 的联合训练。
-人工接管与 dropout 均由在线模块处理一次；评估模式关闭 dropout。
-
-真实权重测试（先在 YAML 中配置校准后的 task_thresholds；部署策略尺寸由 framework 独立指定）：
+当前仓库可使用真实权重 smoke test 检查接口链路。它们使用合成输入，
+不代表 critic 已学会任务价值或策略表现有所提升。
+以下离线命令要求本地模型目录完整；远程加载时去掉 `HF_HUB_OFFLINE=1`。
 
 ```bash
-HF_HUB_OFFLINE=1 .venv/bin/python -m examples.LIBERO.test_oft_recap \
-  --model_id /home/ma/vla/playground/Pretrained_models/Qwen3-VL-2B-Instruct \
-  --critic_checkpoint /path/to/recap_value/final/critic.pt \
-  --freeze_backbone --backward
+# critic：加载、价值损失、价值头反向梯度、预测、轨迹优势与条件文本
+HF_HUB_OFFLINE=1 uv run --no-sync python -m vla.model.modules.recap.recap \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml \
+  --model_id playground/Pretrained_models/Qwen3-VL-2B-Instruct \
+  --device cpu --freeze_backbone --backward
+
+# 策略：需先在 YAML 配好 critic 骨干路径和实际 task_thresholds
+HF_HUB_OFFLINE=1 uv run --no-sync python -m examples.LIBERO.test_oft_recap \
+  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml \
+  --model_id playground/Pretrained_models/Qwen3-VL-2B-Instruct \
+  --critic_checkpoint playground/checkpoints/recap_value/final/critic.pt \
+  --device cuda --freeze_backbone --backward
 ```
 
-该测试真实加载策略和 critic，使用合成回报目标验证在线条件、动作头反向传播和三种推理条件。
-随机动作头尚未经过机器人任务训练；测试成功不代表策略表现有所提升。
+critic smoke test 可通过 `--checkpoint /path/to/critic.pt` 验证权重恢复。
+上述示例冻结主干，只检查价值头／动作头梯度；critic 主干反向可在 YAML 设置
+`recap.value_model.freeze_backbone: false`，去掉 `--freeze_backbone` 并使用 `--device cuda --backward`。
+策略测试中的 `--model_id` 只覆盖策略骨干，critic 仍由 `recap.qwenvl` 配置。
 
-## 数据加载器与在线优势
-
-已有完整轨迹可直接复用，不需要逐帧标签文件。先配置奖励来源、训练过的 critic 和按任务校准的阈值，
-再由共享 DataLoader 读取当前观测、奖励目标与必要的后续观测，策略在模型设备即时计算优势。
-`posttrain` 的 bootstrap 到达轨迹末端时为零；任务阈值由
-`recap.advantage.task_thresholds` 配置，不能用每个随机 batch 的分位数替代。
-
-Dataset 已移除 sidecar/Parquet 优势标签读取；`datasets.vla_data.advantage_labels` 不再使用。
-`label_recap_advantages` 仅作为独立检查与阈值校准工具，导出文件不参与 VLA 训练。
-
-## 完整价值训练与离线标注入口
-
-通用入口位于 `vla/training`，通过必填的 `--config_yaml` 选择环境，
-价值训练、离线标注和策略训练共用传入的任务 YAML。
-`examples/<环境>/train_files/` 保存环境配置；下文以
-`examples/LIBERO/train_files/starvla_oft_recap_libero.yaml` 为例。
-旧的 `python -m examples.LIBERO...` 入口已迁移，使用下面的新模块路径：
-
-- `python -m vla.training.train_recap_value`：完整轨迹 → 剩余回报 → 价值训练／验证 → checkpoint。
-- `python -m vla.training.label_recap_advantages`：训练好的 checkpoint → 连续优势 → 任务阈值 → 数据集标签。
-- 数据加载共用 `vla/dataloader/build_dataloader` 和原有 LeRobot Dataset；
-  `vla/dataloader/recap_targets.py` 只计算标量 Reward/Return，CLI 和 checkpoint 工具在 `vla/training/recap_utils.py`。
-
-当前数据适配器支持仓库已注册的 LeRobot 数据集，通过
-`datasets.vla_data.data_root_dir` 和 `data_mix` 选择数据，通过 `recap.data`
-指定任务、结果和接管字段。其他环境使用同一套训练／标注代码和各自的配置。
-其他数据格式仍需实现完整轨迹读取适配，不能仅靠更换 YAML 自动支持；
-这里提供的是离线轨迹训练流程，不包含各仿真环境的在线交互与采集逻辑。
-
-训练入口复用 Accelerate，支持 CPU、单 GPU、torchrun DDP 和项目现有的 DeepSpeed 配置。
-默认 bf16，默认冻结 Qwen 主干、仅训练价值头；策略网络不参与这一步。
-标签导出使用单进程。完整命令与续训说明见 [训练指南](../../../../docs/value_training.md)。
-
-### 1. 准备轨迹结果和奖励配置
-
-默认在每个 LeRobot 数据集根目录放 `meta/recap_episodes.jsonl`，每条轨迹恰好一行：
-
-```jsonl
-{"episode_index": 0, "success": true, "complete": true}
-{"episode_index": 1, "success": false, "complete": true}
-```
-
-这里的 complete 表示轨迹已经真正结束。最后一条存储的 observation 被视为终止样本；
-成功终止奖励为 0，失败终止奖励为负的 failure_penalty，其他时刻为 -1。
-如果原数据最后一行仍然是终止前 observation，需要先对齐终止语义／补齐终止观测。
-截断轨迹不能直接套用终止 Monte Carlo 标签。只有图像和动作、没有任务结果时，
-脚本不会猜测成功与否。
-
-也支持以下显式选择：
-
-- `recap.data.success_source: column`：读取每条轨迹最后一行的
-  `recap.data.success_column`，默认 `success`，必须是布尔值。
-- `recap.data.success_source: all_success`：仅适用于你已确认全部完整且成功的演示数据。
-- `recap.data.truncated_column`：可指定截断标志列，发现 true 就拒绝处理。
-- `recap.data.intervention_column`：可指定逐帧布尔人工接管列，对应标签强制为 positive；
-  未指定时视为无接管，指定后缺列会报错。
-
-任务由 `recap.data.task_column`（默认 task_index）识别，同一轨迹必须只有一个任务。
-内部任务键为 `数据集名称:任务ID`，避免不同数据集的局部 task_index 冲突。
-frame_index 必须从 0 连续递增；脚本按原始轨迹读取所有帧，不使用策略的随机混合采样或删帧结果。
-图像／状态／文本复用原有加载与归一化，变换置为 eval；带未来观测的窗口会被拒绝。
-原 Dataset 保留 VLA 的 action 等字段，并按配置附加帧信息和回报；
-价值模型只将图像、语言和可选状态编码为输入，动作、成功标志和未来回报不进入主干。
-`return_frame_info`、`return_value_targets`、`sampling_mode` 由配置控制，
-普通 VLA 的默认字段与随机采样保持原样；Value 入口选择 `profiles.value` 配置。
-
-共享 YAML 的两个奖励参数必须先填写：
-
-```yaml
-recap:
-  reward:
-    failure_penalty: 100   # 仅为配置示例，不是论文统一参数
-    normalization: 1000   # 仅当全部回报都落在 [-1, 0] 时才适用
-    task_overrides: {}
-```
-
-也可设置 `recap.reward.source: column` 和 `recap.reward.column: next.reward`，
-读取已有逐帧奖励（与当前 observation 对齐）。此模式无需成功清单或 failure_penalty，
-仍要求完整轨迹、固定 normalization 和匹配的价值支持范围。
-
-所有奖励先除以 normalization，然后从轨迹尾部累计得到每帧 return。
-对长度 L 的失败轨迹，初始回报是 `-(L - 1 + failure_penalty) / normalization`。
-尺度在同一任务内固定，训练与标注一致；超出价值支持范围会报错，不会静默截断。
-不同任务可在 `task_overrides` 下按 `"数据集名称:任务ID"`
-设置各自的 failure_penalty、normalization。默认 null 是必填占位，不能直接开始训练。
-
-### 2. 检查元数据并训练
-
-从仓库根目录执行。以下命令假设已经在共享 YAML 填好奖励配置和路径：
-
-```bash
-NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.train_recap_value \
-  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --check_data
-
-NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.train_recap_value \
-  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda
-```
-
-`--check_data` 读取轨迹表并验证结果、索引和回报，不加载 Qwen，也不逐帧解码视频。
-底层 LeRobot 读取需要 Parquet 引擎（如 pyarrow）和配置的视频后端（本例 pyav）。
-缺少数据、结果清单或依赖时必须先补齐。
-
-训练参数都在 `recap.training`，独立于策略的 `trainer`：
-batch_size、max_steps（优化器更新次数）、gradient_accumulation_steps、
-learning_rate、validation_fraction、eval_interval、save_interval 等。
-每个任务按完整轨迹划分验证集，避免相邻帧泄漏；只有一条轨迹的任务保留在训练集。
-如果整个数据集都无法划出验证轨迹，会报错；可明确设置 validation_fraction: 0 关闭验证。
-训练均匀采样所有训练帧，不使用策略数据混合器的采样权重。
-
-默认产物：
-
-```text
-playground/Checkpoints/recap_value/
-  config.yaml                  # 完整训练配置
-  split.json
-  metrics.jsonl                 # 训练/验证 CE、MAE、MSE、预测 Value 均值与真实 Return 均值
-  step_0001000/...              # 周期保存
-  final/
-    critic.pt                  # QwenValueModel.state_dict，含主干、价值头、bins
-    training_state/            # Accelerate 模型、优化器、每 rank RNG 和采样器状态
-    progress.json              # 优化器 step、epoch、已消费 batch 数、恢复约定
-    metadata.json              # 奖励尺度、输入约定和训练划分
-    config.yaml                # 完整共享配置，checkpoint 指向此 critic.pt
-```
-
-新训练的输出目录已存在时拒绝覆盖。`--checkpoint` 只加载权重，是新优化器和新步数的热启动。
-`--resume_from_checkpoint /path/to/step_0001000` 则恢复完整训练状态和数据位置，
-可在相同运行目录或新目录继续。恢复要求相同数据、划分、随机种子、训练超参数和 world size；
-`max_steps` 是目标总更新次数，可增加。已有 final 会保留，新终态保存为 final_step_XXXXXXX。
-checkpoint 先写隐藏临时目录，全部 rank 保存完成后再原子发布。
-
-### 3. 检查优势并校准任务阈值
-
-这是可选的独立工具；任务 YAML 和共享训练默认配置均不包含 `labeling` 节点。
-需要导出检查结果时，在命令行单独指定目录：
-
-```bash
-NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m vla.training.label_recap_advantages \
-  --config_yaml examples/LIBERO/train_files/starvla_oft_recap_libero.yaml --device cuda \
-  --set recap.labeling.output_dir=/tmp/recap_inspection
-```
-
-未指定 checkpoint 时自动选择 `recap.training.output_dir` 中步数最大的完整 checkpoint；
-也可用 `--checkpoint /path/to/critic.pt` 选择中间 checkpoint。
-必须同时保留同目录下的 metadata.json，标注前会检查训练步数和奖励／输入约定。
-单独下载的 Instruct 权重不能作为已训练的 critic 标注数据。
-
-脚本按 prediction_batch_size 分批解码图像和计算价值，整条轨迹只缓存数值数组。
-默认使用 posttrain 50 步优势；阈值在全部标注轨迹的有效帧上按任务统一标定，
-不是每个 batch 单独标定。离线标签不做条件 dropout；策略训练阶段再做 dropout。
-
-每个数据集写入 `recap.labeling.label_path`（默认 `meta/advantage_labels.jsonl`）供检查，
-这些文件不会被 VLA DataLoader 读取。
-`recap.labeling.output_dir` 默认 `playground/Checkpoints/recap_labels`，保存：
-
-- `scores.jsonl`：dataset_name、episode_index、frame_index、task_key、reward、value、return、advantage、标签及接管标记。
-- `metadata.json`：checkpoint、优化器步数、任务 ID 映射、阈值、实际正样本比例和标签路径。
-- `config.yaml`：保留 framework 的完整共享配置，并记录 critic 路径和标定阈值。
-
-已有标签默认拒绝覆盖。新一轮标注需要新的 labeling.output_dir；
-只有明确传入 `--overwrite_labels` 才会替换旧标签。每个文件先写临时文件再替换。
-校准结束后，将导出配置中的 `recap.value_model.checkpoint` 和
-`recap.advantage.task_thresholds` 写回任务 YAML，再启动 VLA 在线训练。
-
-所有配置都可通过 `--set KEY=VALUE ...` 临时覆盖；奖励覆盖必须在训练和标注两步保持一致。
-推荐把最终取值写回共享 YAML，减少手工不一致。
-
-### 验证范围
-
-`test_online_policy.py` 在 CPU 上运行实际价值头、MC return 分类损失、critic checkpoint
-加载和在线优势逻辑；策略父类使用小型条件回归替身，验证 loss 与动作损失一致，
-动作参数可更新而 critic 参数保持不变。
-这些测试不代表真实 Qwen、多 GPU／DeepSpeed 或真实视频解码已完成验证。
-
-```bash
-NO_ALBUMENTATIONS_UPDATE=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover \
-  -s vla/model/modules/recap/tests -v
-```
+上述 smoke test 不覆盖真实数据视频解码、多 GPU 或 DeepSpeed CUDA 执行；这些需用实际训练环境单独验证。
