@@ -260,7 +260,8 @@ class Qwenvl_OFT(baseframework):
             action_queries = action_queries.to(dtype=next(self.action_model.parameters()).dtype)
             pred_actions = self.action_model.predict_action(action_queries)  # (B, chunk_len, action_dim)
 
-        normalized_actions = pred_actions.detach().cpu().numpy()
+        # NumPy cannot represent bfloat16 (the default policy-server dtype).
+        normalized_actions = pred_actions.detach().float().cpu().numpy()
         return {"normalized_actions": normalized_actions}
 
     def _build_action_inputs(self, images, instructions, examples, *, inference, **kwargs):

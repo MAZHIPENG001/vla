@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from vla.model.framework.base_framework import baseframework
-from vla.model.framework.share_tools import read_mode_config
+from vla.model.framework.share_tools import include_state_enabled, read_mode_config
 
 from deployment.model_server.policy_norm_processor import PolicyNormProcessor
 
@@ -42,6 +42,7 @@ class PolicyServerWrapper:
         device: str = "cuda",
         use_bf16: bool = False,
         unnorm_key: Optional[str] = None,
+        include_state: Optional[bool] = None,
     ) -> None:
         self._ckpt_path = str(ckpt_path)
 
@@ -55,9 +56,12 @@ class PolicyServerWrapper:
         # Co-located metadata.
         model_cfg, _ = read_mode_config(self._ckpt_path)
         self._model_cfg = model_cfg
-        # Match LeRobotSingleDataset._pack_sample's default. Passing state to
-        # a no-state OFT checkpoint changes its language prompt.
-        self._include_state = model_cfg["datasets"]["vla_data"].get("include_state", False) not in ["False", False]
+        # Missing metadata does not mean state was disabled during training.
+        self._include_state = (
+            include_state_enabled(model_cfg["datasets"]["vla_data"])
+            if include_state is None else include_state
+        )
+        logging.info("Policy state input: include_state=%s (override=%s)", self._include_state, include_state)
 
         # action_chunk_size = future_action_window_size + 1 (matches old client).
         action_model_cfg = model_cfg["framework"]["action_model"]

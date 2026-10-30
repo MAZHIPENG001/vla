@@ -52,6 +52,7 @@ from vla.dataloader.gr00t_lerobot.schema import (
 )
 from vla.dataloader.gr00t_lerobot.transform import ComposedModalityTransform
 from vla.dataloader.gr00t_lerobot.transform.state_action import StateActionTransform
+from vla.model.framework.share_tools import include_state_enabled
 
 from functools import partial
 from typing import Tuple, List
@@ -1439,7 +1440,7 @@ class LeRobotSingleDataset(Dataset):
             "robot_tag": self.tag
         }
 
-        if self.data_cfg is not None and self.data_cfg.get("include_state", False) not in ["False", False]:
+        if include_state_enabled(self.data_cfg):
             state = []
             for state_key in self.modality_keys.get("state", []):
                 state.append(data[state_key])

@@ -1,6 +1,6 @@
 # LIBERO 评测核对记录
 
-核对日期：2026-10-30。以环境源码和训练输入为依据，StarVLA 评测代码仅作对照。
+核对日期：2026-10-30；2026-10-31 补查 state 默认值与时间索引。以环境源码和训练输入为依据，StarVLA 评测代码仅作对照。本轮按用户要求停止本地权重加载，不包含真实策略 rollout 或成功率复测。
 
 核对对象：
 
@@ -18,7 +18,9 @@
 | 两路相机 | DataConfig.video_keys 和 modality.json 都是 primary→wrist | 保留 agentview_image→robot0_eye_in_hand_image |
 | 180° 旋转 | OpenVLA 再生成脚本说明 HDF5→RLDS 阶段旋转 180°；评测应匹配数据转换。旋转不是 LIBERO 环境本身的统一要求 | 保留两轴反转，不额外转换 RGB/BGR 或 crop |
 | 256→224 | 训练 _pack_sample 使用 RGB PIL resize((224,224))，默认 BICUBIC；原客户端为 BILINEAR，上游也有同样差异 | 改为 BICUBIC，测试与训练调用逐像素一致 |
-| state | 发布配置没有 include_state，训练打包默认 false；原评测始终传 state，当前 QwenOFT 会追加 [STATE] … [ACTION] 提示词 | 客户端遵循服务端元数据，服务端按 checkpoint 再过滤，避免额外提示词 |
+| state 默认值 | 用户明确 state 默认输入模型；此前训练、服务端、客户端把缺失 include_state 当作 false，会静默删掉状态 | 默认改为 true；训练和服务端共用解析函数；只有显式 false 才关闭；旧 server 未提供元数据时客户端也默认发送 |
+| state 时间索引 | LIBERO DataConfig 取 range(-16,0)，OFT 文本化只读取 state[0]，因此帧 t 使用 max(t-16,0) 的状态；评测却输入 t 的状态 | 改为 [0]，训练和评测均使用当前帧、8 维、float16 状态；不能借此修复旧权重已经学到的时间关系 |
+| BF16 输出 | 启动脚本默认 --use_bf16，OFT 动作头也是 BF16，原 .cpu().numpy() 会抛出 Unsupported ScalarType BFloat16 | 转为 float32 再返回 NumPy；这是推理异常修复，不是成功率提升的证据 |
 | Action Chunk | future window=7，包含当前动作共 8 步。参考 openpi，每个 episode 新建 deque，队列为空才推理 | 取新预测的前 replan_interval 个动作，逐个 popleft；移除全局 step 和预测索引，episode 结束时直接丢弃队列；短预测执行完后重推理 |
 | 反归一化 | 当前与上游 LIBERO DataConfig 都只对前 6 维使用 min/max，夹爪直通，不是 q01/q99 | 保留训练变换逆路径，增加统计维数校验 |
 | 成功判定 | 本地 bddl_base_domain.py 的 step 将 done 覆盖为 _check_success() | 现有 done 计数正确 |
@@ -30,9 +32,9 @@
 
 验证结果：
 
-- `MPLCONFIGDIR=/tmp/vla-mpl NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s tests -v`：11 项通过。测试隔离 websocket 传输层与仿真依赖，覆盖实际 rollout 的 1/2/4/8 重规划、每次使用最新观测、episode/任务切换、短预测、非法响应、相机像素、state 过滤和资源关闭。
+- `MPLCONFIGDIR=/tmp/vla-mpl NO_ALBUMENTATIONS_UPDATE=1 .venv/bin/python -m unittest discover -s tests -v`：14 项通过。测试隔离 websocket 传输层与仿真依赖，覆盖 rollout 的 1/2/4/8 重规划、每次使用最新观测、episode/任务切换、短预测、非法响应、相机像素、默认 state 在训练打包与服务端保留、旧 server 兼容、显式关闭 state、BF16 动作头和资源关闭。仿真环境和 VLM 使用轻量替身，不能视为真实任务成功率。
 - 用实际发布 checkpoint 统计验证随机 (8,7) 预测：与六维 min/max、夹爪直通的独立计算最大误差 0.0；再经训练正向变换恢复预测，最大误差 1.1920929e-07。
-- 修改的两个 shell 入口通过 bash -n。尚未运行仿真探针或成功率复测：当前 .venv 未安装 LIBERO/robosuite，源码存在不等于运行依赖就绪。
+- 三个 shell 入口（server、单次 eval、批量 eval）通过 bash -n。state CLI 与三个 LIBERO YAML 配置检查通过，CLI 检查隔离了 websocket 传输依赖。尚未运行仿真探针或成功率复测：当前 .venv 未安装 LIBERO/robosuite，源码存在不等于运行依赖就绪。
 
 在已有 LIBERO 运行环境执行独立探针，不需要 policy server：
 
@@ -64,7 +66,13 @@ done
 | binary_close | 0 张开，1 闭合 | 0→-1，1→+1，阈值 0.5 |
 | signed_close（本地原始数据） | -1 张开，+1 闭合 | 保持符号，零保持夹爪 |
 
-若启用 state 训练，还需核对时间索引：当前本仓库 LIBERO DataConfig 为 range(-16,0)，本地上游 registry 为 [0]，评测提供当前单帧。该差异不影响已禁用 state 的发布模型，目前不能宣称 state 模型已完整对齐。state 是否发送完全遵循 server 的 checkpoint 元数据。
+state 输入为 EEF xyz、axis-angle 旋转向量和两个手指 qpos，共 8 维；modality.json 的 pad/gripper 名称实际对应两个手指位置，不应替换成动作的二值开合值。LIBERO 的三个训练配置均显式 include_state: true，state_dim 修正为 8。客户端在文本化前使用训练打包相同的 float16 精度。
+
+历史紧凑配置未保存 include_state，单凭这一点以及权重名称/形状不能确定它的训练提示词。此前将这类配置判定为“不用 state”的结论已撤回。当前默认遵循用户明确的 state 输入约定；这不证明旧 checkpoint 已与新默认设置对齐。修改 DataConfig 的时间索引只影响后续数据加载，不能改变已训练模型。
+
+本仓库 LIBERO transform 未归一化 state；评测也保留同样的原始量，未擅自增加 min/max 归一化。OFT 的分桶函数只覆盖 [-1,1]，实际约 3 rad 的旋转向量可能落入最高桶，属于需要后续统一训练/推理表示的风险；不能只在评测时归一化后就声称适配了旧模型。
+
+重启 server 后，日志中的 include_state 应为 True。普通 server 启动脚本和批量入口均接受 INCLUDE_STATE=auto|true|false；auto 使用 checkpoint 的显式设置，缺省为 true。直接运行 server_policy.py 时使用 --include-state 或 --no-include-state。显式开关只用于已知训练约定或固定条件的对照，不再根据“配置缺失”推断关闭。
 
 整理后的职责：eval_libero.py 管理 episode、动作队列、统计和视频；ModelClient.infer(example) 只返回未经夹爪映射的 (T,7) 反归一化动作块；libero_contract.py 管理相机、夹爪和可选 state。旧 ModelClient.step/raw_action 接口已移除。发生评测异常时向上抛出，并在 finally 中关闭环境和连接；批量入口也会清理自己启动的 server。
 

@@ -22,6 +22,18 @@ from vla.training.trainer_utils import initialize_overwatch
 overwatch = initialize_overwatch(__name__)
 
 
+def include_state_enabled(data_cfg) -> bool:
+    """State is an input by default; only an explicit false disables it."""
+    value = data_cfg.get("include_state", True) if data_cfg is not None else True
+    if isinstance(value, str):
+        if value.lower() in ("true", "false"):
+            return value.lower() == "true"
+        raise ValueError(f"include_state must be a boolean, got {value!r}")
+    if not isinstance(value, bool):
+        raise ValueError(f"include_state must be a boolean, got {value!r}")
+    return value
+
+
 class NamespaceWithGet(SimpleNamespace):
     def get(self, key, default=None):
         """

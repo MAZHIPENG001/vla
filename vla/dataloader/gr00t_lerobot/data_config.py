@@ -471,7 +471,8 @@ class Libero4in1DataConfig:
 
     observation_indices = [0]
     action_indices = list(range(8))
-    state_indices = list(range(-16, 0))
+    # OFT serializes state[0]; use the same current observation as evaluation.
+    state_indices = [0]
 
     def modality_config(self):
         video_modality = ModalityConfig(

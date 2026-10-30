@@ -22,6 +22,7 @@ def main(args) -> None:
         ckpt_path=args.ckpt_path,
         device="cuda",
         use_bf16=args.use_bf16,
+        include_state=args.include_state,
     )
 
     hostname = socket.gethostname()
@@ -45,6 +46,10 @@ def build_argparser():
     parser.add_argument("--ckpt_path", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--port", type=int, default=10093)
     parser.add_argument("--use_bf16", action="store_true")
+    parser.add_argument(
+        "--include-state", action=argparse.BooleanOptionalAction, default=None,
+        help="Override checkpoint state setting; absent metadata defaults to enabled.",
+    )
     parser.add_argument("--idle_timeout", type=int, default=1800, help="Idle timeout in seconds, -1 means never close")
     return parser
 

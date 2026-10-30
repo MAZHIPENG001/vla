@@ -137,6 +137,10 @@ class LiberoContractTests(unittest.TestCase):
             fake.predict_action = lambda _, bad=bad: {"data": {"actions": bad}}
             with self.assertRaises(ValueError):
                 make_client(fake).infer({"image": [], "lang": "a"})
+        fake = FakePolicy()
+        fake.predict_action = lambda _: {"ok": False, "error": {"message": "unsupported bfloat16"}}
+        with self.assertRaisesRegex(RuntimeError, "unsupported bfloat16"):
+            make_client(fake).infer({"image": [], "lang": "a"})
 
     def test_cameras_rotation_resize_and_state_match_training(self):
         rng = np.random.default_rng(42)
@@ -156,12 +160,19 @@ class LiberoContractTests(unittest.TestCase):
         env = FakeEnv()
         _run_episode(env, make_client(fake), None, "pick", Args(num_steps_wait=0), 1)
         state = fake.requests[0]["examples"][0]["state"]
-        np.testing.assert_allclose(state, [[0, 0, 0, 0, 0, 0, 0.02, -0.02]])
+        self.assertEqual(state.dtype, np.float16)
+        np.testing.assert_array_equal(state, np.array([[0, 0, 0, 0, 0, 0, 0.02, -0.02]], np.float16))
         obs = env.observation()
         obs["robot0_eef_quat"] = np.array([0., 0., np.sin(0.2), np.cos(0.2)])
         original = obs["robot0_eef_quat"].copy()
         np.testing.assert_allclose(libero_state(obs)[3:6], [0, 0, 0.4])
         np.testing.assert_array_equal(obs["robot0_eef_quat"], original)
+
+    def test_legacy_server_without_state_metadata_receives_state(self):
+        fake = FakePolicy()
+        fake.get_server_metadata = lambda: {"action_chunk_size": 8}
+        _run_episode(FakeEnv(), make_client(fake), None, "pick", Args(num_steps_wait=0), 1)
+        self.assertEqual(fake.requests[0]["examples"][0]["state"].shape, (1, 8))
 
     def test_evaluation_closes_environment_and_connection_on_success_or_error(self):
         task = SimpleNamespace(language="pick")

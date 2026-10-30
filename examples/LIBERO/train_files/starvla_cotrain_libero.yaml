@@ -14,7 +14,7 @@ framework:
     vl_hidden_dim: 2048
   action_model:
     action_dim: 7
-    state_dim: 7
+    state_dim: 8
     action_horizon: 8
 
 # RECAP value training shares this task config with the VLA policy.
@@ -78,6 +78,7 @@ datasets:
     per_device_batch_size: 4
 
   vla_data:
+    include_state: true
     # Standard VLA samples keep the original fields and random mixture sampling.
     return_frame_info: false
     return_value_targets: false

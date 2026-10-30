@@ -17,6 +17,7 @@ base_port=$4
 num_trials_per_task="${NUM_TRIALS_PER_TASK:-50}"
 replan_interval="${REPLAN_INTERVAL:-8}"
 gripper_encoding="${GRIPPER_ENCODING:-binary_open}"
+include_state="${INCLUDE_STATE:-auto}"
 
 cd "${STARVLA_DIR}"
 export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-${LIBERO_HOME}/libero}"
@@ -24,8 +25,15 @@ export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${STARVLA_DIR}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 
-CUDA_VISIBLE_DEVICES="$gpu_id" "${starVLA_python}" deployment/model_server/server_policy.py \
-  --ckpt_path "$your_ckpt" --port "$base_port" --use_bf16 &
+server_cmd=("${starVLA_python}" deployment/model_server/server_policy.py
+  --ckpt_path "$your_ckpt" --port "$base_port" --use_bf16)
+case "${include_state}" in
+  auto) ;;
+  1|true|True) server_cmd+=(--include-state) ;;
+  0|false|False) server_cmd+=(--no-include-state) ;;
+  *) echo "INCLUDE_STATE must be auto, true, or false" >&2; exit 1 ;;
+esac
+CUDA_VISIBLE_DEVICES="$gpu_id" "${server_cmd[@]}" &
 server_pid=$!
 trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 

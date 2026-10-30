@@ -131,6 +131,10 @@ Edit the checkpoint path in `examples/LIBERO/eval_files/run_policy_server.sh`:
 CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-OFT-LIBERO-4in1/checkpoints/steps_50000_pytorch_model.pt
 TRANSFORMERS_VERBOSITY=error bash examples/LIBERO/eval_files/run_policy_server.sh
 ```
+state 默认输入模型；启动日志中的 `include_state` 应为 `True`。
+LIBERO 状态为当前帧的 8 维 EEF 位置、axis-angle 旋转向量和双指 qpos。
+只有明确按无 state 训练的模型才使用 `INCLUDE_STATE=false` 启动服务端。
+修改配置或更新服务端代码后需要重启，完整核对记录见 [评测排查记录](docs/libero_eval_audit.md)。
 ### Step 3: Run evaluation (Terminal 2 — LIBERO env)
 Edit the paths in examples/LIBERO/eval_files/eval_libero.sh, then:
 ```bash
