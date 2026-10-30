@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+VLA="${VLA:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 LIBERO_HOME="${LIBERO_HOME:-}"
 LIBERO_PYTHON="${LIBERO_PYTHON:-python}"
-CKPT="${CKPT:-${STARVLA_DIR}/playground/Checkpoints/libero_example/checkpoints/steps_50000_pytorch_model.pt}"
+CKPT="${CKPT:-${VLA}/playground/Pretrained_models/StarVLA/Qwen3-VL-OFT-LIBERO-4in1/checkpoints/steps_50000_pytorch_model.pt}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-6694}"
 TASK_SUITE_NAME="${TASK_SUITE_NAME:-libero_goal}"
@@ -18,9 +18,9 @@ if [[ -z "${LIBERO_HOME}" ]]; then
   exit 1
 fi
 
-cd "${STARVLA_DIR}"
+cd "${VLA}"
 export LIBERO_CONFIG_PATH="${LIBERO_HOME}/libero"
-export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${STARVLA_DIR}"
+export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${VLA}"
 export MUJOCO_GL="${MUJOCO_GL_VALUE}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM_VALUE}"
 

@@ -27,8 +27,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
-from starVLA.model.framework.base_framework import baseframework
-from starVLA.model.framework.share_tools import read_mode_config
+from vla.model.framework.base_framework import baseframework
+from vla.model.framework.share_tools import read_mode_config
 
 from deployment.model_server.policy_norm_processor import PolicyNormProcessor
 

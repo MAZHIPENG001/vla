@@ -85,8 +85,6 @@ for d in "$DATA_ROOT"/*/; do
   cp examples/LIBERO/train_files/modality.json "$d/meta/"
 done
 ```
-
-
 ```bash
 python vla/dataloader/lerobot_datasets.py --config_yaml examples/LIBERO/train_files/starvla_cotrain_libero.yaml
 ```
@@ -128,14 +126,16 @@ modelscope download \
     --token "$MODELSCOPE_TOKEN"
 ```
 ### Step 2: Start the policy server (Terminal 1 — starVLA env)
-Edit the checkpoint path in examples/LIBERO/eval_files/run_policy_server.sh:
+Edit the checkpoint path in `examples/LIBERO/eval_files/run_policy_server.sh`:
 ```bash
 CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-OFT-LIBERO-4in1/checkpoints/steps_50000_pytorch_model.pt
+bash examples/LIBERO/eval_files/run_policy_server.sh
 ```
 ### Step 3: Run evaluation (Terminal 2 — LIBERO env)
 Edit the paths in examples/LIBERO/eval_files/eval_libero.sh, then:
 ```bash
-conda activate libero
+export LIBERO_HOME=/home/ma/LIBERO
+export LIBERO_PYTHON="$PWD/.venv/bin/python"
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
 bash examples/LIBERO/eval_files/eval_libero.sh
