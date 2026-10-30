@@ -29,16 +29,16 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import torch
 
-from starVLA.dataloader.gr00t_lerobot.registry import (
+from vla.dataloader.gr00t_lerobot.registry import (
     DATASET_NAMED_MIXTURES,
     ROBOT_TYPE_CONFIG_MAP,
 )
-from starVLA.dataloader.gr00t_lerobot.schema import (
+from vla.dataloader.gr00t_lerobot.schema import (
     DatasetMetadata,
     StateActionMetadata,
 )
-from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
-from starVLA.model.framework.share_tools import read_mode_config
+from vla.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
+from vla.model.framework.share_tools import read_mode_config
 
 logger = logging.getLogger(__name__)
 
