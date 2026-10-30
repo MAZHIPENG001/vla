@@ -45,15 +45,28 @@ wandb login
 export WANDB_MODE=disabled
 ```
 
-## 模型验证
+## 环境验证:模型
+### 预训练大语言模型下载
+```
+echo 'export MODELSCOPE_TOKEN="你的Token"' >> ~/.bashrc
+source ~/.bashrc
+cd ./playground/Pretrained_models
+modelscope download \
+    --model MaZp001/vla \
+    --local_dir . \
+    --include \
+        "Qwen3-VL-4B-Instruct/*" \
+    --token "$MODELSCOPE_TOKEN"
+```
 ```bash
+# VLM
 python vla/model/modules/vlm/Qwen.py
-
+# VLA
 python vla/model/framework/VLM4A/QwenPI.py
 python vla/model/framework/VLM4A/QwenGR00T.py
 ```
-
-## 示例数据集下载 -- LIBERO
+## 数据集验证
+### 示例数据集下载 -- LIBERO
 ```bash
 # 如网络需要，可在当前终端设置 Hugging Face 镜像：
 # export HF_ENDPOINT=https://hf-mirror.com
@@ -73,17 +86,12 @@ for d in "$DATA_ROOT"/*/; do
 done
 ```
 
-## 数据集验证
+
 ```bash
-python vla/dataloader/lerobot_datasets.py \
-  --config_yaml examples/LIBERO/train_files/starvla_cotrain_libero.yaml
+python vla/dataloader/lerobot_datasets.py --config_yaml examples/LIBERO/train_files/starvla_cotrain_libero.yaml
 ```
 
-## Hugging Face 模型下载
-```bash
-hf download Qwen/Qwen3-VL-4B-Instruct --local-dir playground/Pretrained_models/Qwen3-VL-4B-Instruct
-```
-## 开始训练
+## 模型训练
 
 先修改脚本中的模型、数据、输出目录、NCCL 网卡与 WandB 配置，再执行：
 
@@ -93,3 +101,42 @@ bash examples/LIBERO/train_files/run_libero_train.sh
 
 Value Model 独立训练、断点续训和优势阈值校准见 [RECAP 训练指南](vla/model/modules/recap/README.md)。
 默认冻结 Qwen 主干，仅训练 Value Head；支持 bf16、单卡、DDP 和现有 DeepSpeed 配置。
+
+## 模型测评
+### Step 0: Set up the LIBERO environment
+Create a separate conda environment for the LIBERO simulator:
+
+```bash
+conda create -n libero python=3.10 -y
+conda activate libero
+pip install mujoco==3.2.3
+# Clone and install LIBERO
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+cd LIBERO && pip install -e . && cd ..
+
+# Install eval dependencies
+pip install tyro matplotlib mediapy websockets msgpack numpy==1.24.4
+```
+### Step 1: Download a checkpoint
+```bash
+cd ./playground/Pretrained_models
+modelscope download \
+    --model MaZp001/vla \
+    --local_dir . \
+    --include \
+        "StarVLA/Qwen3-VL-OFT-LIBERO-4in1/*" \
+    --token "$MODELSCOPE_TOKEN"
+```
+### Step 2: Start the policy server (Terminal 1 — starVLA env)
+Edit the checkpoint path in examples/LIBERO/eval_files/run_policy_server.sh:
+```bash
+CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-OFT-LIBERO-4in1/checkpoints/steps_50000_pytorch_model.pt
+```
+### Step 3: Run evaluation (Terminal 2 — LIBERO env)
+Edit the paths in examples/LIBERO/eval_files/eval_libero.sh, then:
+```bash
+conda activate libero
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+bash examples/LIBERO/eval_files/eval_libero.sh
+```
