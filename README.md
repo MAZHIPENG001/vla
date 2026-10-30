@@ -134,7 +134,8 @@ bash examples/LIBERO/eval_files/run_policy_server.sh
 ### Step 3: Run evaluation (Terminal 2 — LIBERO env)
 Edit the paths in examples/LIBERO/eval_files/eval_libero.sh, then:
 ```bash
-export LIBERO_HOME=/home/ma/LIBERO
+# export LIBERO_HOME=/home/ma/LIBERO
+export LIBERO_HOME=/mnt/data/3dgs/mzp/LIBERO
 export LIBERO_PYTHON="$PWD/.venv/bin/python"
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
