@@ -14,7 +14,7 @@ REALTIME="${REALTIME:-true}"
 # Simulation control frequency and replay FPS.
 CONTROL_FREQ="${CONTROL_FREQ:-20}"
 # RTC is opt-in; H is read from the connected policy server's metadata.
-RTC_ENABLED="${RTC_ENABLED:-false}"
+RTC_ENABLED="${RTC_ENABLED:-true}"
 RTC_STRIDE="${RTC_STRIDE:-4}"
 RTC_DELAY="${RTC_DELAY:-2}"
 RTC_BETA="${RTC_BETA:-0.5}"
