@@ -382,6 +382,8 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
         )
 
         num_steps = self.num_inference_timesteps
+        if not isinstance(num_steps, int) or num_steps <= 0:
+            raise ValueError("Flow Matching requires a positive integer number of denoising steps n")
         dt = 1.0 / num_steps
 
         state_features = self.state_encoder(state) if state is not None else None

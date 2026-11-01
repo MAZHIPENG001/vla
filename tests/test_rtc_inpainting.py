@@ -85,6 +85,19 @@ class RTCGuidanceTests(unittest.TestCase):
         )
         torch.testing.assert_close(actual, torch.full_like(initial, 1 / 3))
 
+    def test_paper_beta_five_is_a_clipping_bound_not_an_interpolation_weight(self):
+        parameter = torch.nn.Parameter(torch.tensor(2.))
+        initial = torch.zeros(1, 1, 1)
+        # At tau=0 the unclipped scale is infinite, hence the paper's beta=5
+        # is used directly. f(x)=3*x, so J_f.T @ error=3 at x=0,Y=1.
+        actual = rtc_guided_euler_step(
+            initial, lambda x: parameter * x,
+            torch.ones_like(initial), torch.ones_like(initial),
+            time=0., dt=.1, beta=5.,
+        )
+        torch.testing.assert_close(actual, torch.full_like(initial, 1.5))
+        self.assertIsNone(parameter.grad)
+
     def test_bf16_noise_and_fp16_velocity_promote_like_original_sampler(self):
         initial = torch.ones(1, 1, 1, dtype=torch.bfloat16)
         actual = rtc_guided_euler_step(
@@ -136,7 +149,7 @@ class PIHeadIntegrationTests(unittest.TestCase):
             attention_mask = torch.ones(1, 3, dtype=torch.bool)
             prediction = head.predict_action(
                 hidden, state, attention_mask,
-                rtc={"prefix_actions": torch.ones(1, 2, 7), "delay": 1, "beta": .5},
+                rtc={"prefix_actions": torch.ones(1, 2, 7), "delay": 1, "beta": 5.},
             )
         self.assertEqual(prediction.shape, (1, 4, 7))
         self.assertTrue(torch.isfinite(prediction).all())
@@ -152,6 +165,13 @@ class PIHeadIntegrationTests(unittest.TestCase):
             hidden, rtc={"prefix_actions": torch.ones(1, 2, 7), "delay": 1, "beta": 0.}
         )
         torch.testing.assert_close(original, zero_beta, rtol=0, atol=0)
+
+    def test_sampler_uses_checkpoint_n_and_rejects_invalid_integration_count(self):
+        head = self.make_head()
+        self.assertEqual(head.num_inference_timesteps, 2)
+        head.num_inference_timesteps = 0
+        with self.assertRaisesRegex(ValueError, "denoising steps n"):
+            head.predict_action([torch.randn(1, 3, 8)])
 
 
 if __name__ == "__main__":

@@ -44,12 +44,10 @@ class Args:
     realtime: bool = True  # Advance simulation while inference runs in a worker thread.
     control_freq: int = 20  # Simulation control frequency and replay FPS, in Hz.
     rtc_enabled: bool = False  # Preserve the existing rollout when disabled.
-    rtc_stride: int | Literal["auto"] = "auto"  # Infer request interval from measured delay; int overrides s.
+    rtc_stride: int | Literal["auto"] = "auto"  # Paper s_min; auto selects 1, actual s follows Algorithm 1.
     rtc_delay: int | Literal["auto"] = "auto"  # Measure d from control steps; int seeds initial estimate.
-    rtc_beta: float = 0.5  # Maximum old-chunk weight in output overlap blending.
-    rtc_inpainting: bool = True  # Requires server/model prefix guidance support.
-    rtc_guidance_beta: float = 5.0  # Paper Eq. 2 guidance clipping beta.
-    rtc_timeout: float = 10.0  # Bound each inference request, in wall seconds.
+    rtc_beta: float = 5.0  # Paper Eq. 2 guidance clipping beta (Table 4).
+    inference_timeout: float = 10.0  # Deployment transport bound, in wall seconds.
 
     #################################################################################################################
     # Utils
@@ -227,8 +225,7 @@ def _run_rtc_episode(env, client_model, obs, task_description, args, max_steps):
         raise ValueError("RTC requires realtime=True so inference delay is measured in control cycles")
     config = RTCConfig(
         stride=args.rtc_stride, delay=args.rtc_delay, beta=args.rtc_beta,
-        inpainting=args.rtc_inpainting, guidance_beta=args.rtc_guidance_beta,
-        timeout=args.rtc_timeout,
+        timeout=args.inference_timeout,
     )
     config.validate(client_model.action_chunk_size)
     client_model.set_inference_timeout(config.timeout)

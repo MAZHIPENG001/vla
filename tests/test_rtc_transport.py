@@ -72,6 +72,25 @@ class NormalizationTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 wrapper.predict_action([{}], rtc=invalid)
 
+    def test_paper_beta_and_observed_delay_are_forwarded_without_blend_limits(self):
+        proc = norm_processor()
+        framework = Mock(supports_rtc_inpainting=True)
+        framework.predict_action.return_value = {"normalized_actions": np.zeros((1, 4, 7))}
+        wrapper = PolicyServerWrapper.__new__(PolicyServerWrapper)
+        wrapper._framework = framework
+        wrapper._action_chunk_size = 4
+        wrapper._include_state = True
+        wrapper._default_unnorm_key = "libero"
+        wrapper._get_processor = lambda _: proc
+        # A delay beyond prefix capacity is an exhausted controller budget, not
+        # permission for transport to silently change the observed estimate.
+        wrapper.predict_action([{}], rtc={
+            "prefix_actions": np.ones((1, 2, 7)), "delay": 6, "beta": 5.,
+        })
+        received = framework.predict_action.call_args.kwargs["rtc"]
+        self.assertEqual(received["delay"], 6)
+        self.assertEqual(received["beta"], 5.)
+
 
 class Socket:
     def __init__(self, route):

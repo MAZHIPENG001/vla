@@ -1,6 +1,9 @@
 """Check automatic/manual RTC settings across the shell and real tyro parser."""
 
 import importlib.util
+import dataclasses
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -27,10 +30,29 @@ class RTCArgumentTests(unittest.TestCase):
 
         defaults = tyro.cli(parse, args=[])
         self.assertEqual((defaults.rtc_stride, defaults.rtc_delay), ("auto", "auto"))
+        self.assertEqual(defaults.rtc_beta, 5.0)
         for stride, delay in (("auto", "auto"), (4, 2), (4, "auto"), ("auto", 0)):
             with self.subTest(stride=stride, delay=delay):
                 parsed = tyro.cli(parse, args=["--args.rtc-stride", str(stride), "--args.rtc-delay", str(delay)])
                 self.assertEqual((parsed.rtc_stride, parsed.rtc_delay), (stride, delay))
+
+    @unittest.skipUnless(HAS_TYRO, "tyro is an evaluation CLI dependency")
+    def test_only_paper_beta_is_exposed_and_removed_switches_are_rejected(self):
+        import tyro
+
+        fields = {field.name for field in dataclasses.fields(Args)}
+        self.assertNotIn("rtc_guidance_beta", fields)
+        self.assertNotIn("rtc_inpainting", fields)
+        self.assertNotIn("rtc_timeout", fields)
+        self.assertIn("inference_timeout", fields)
+
+        def parse(args: Args):
+            return args
+
+        self.assertEqual(tyro.cli(parse, args=["--args.rtc-beta", "7"]).rtc_beta, 7)
+        for removed in ("--args.rtc-guidance-beta", "--args.rtc-inpainting", "--args.rtc-timeout"):
+            with self.subTest(removed=removed), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                tyro.cli(parse, args=[removed])
 
 
 class RTCShellTests(unittest.TestCase):
@@ -39,7 +61,7 @@ class RTCShellTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.environment = os.environ.copy()
         for key in list(self.environment):
-            if key.startswith("RTC_") or key == "REALTIME":
+            if key.startswith("RTC_") or key in ("REALTIME", "INFERENCE_TIMEOUT"):
                 self.environment.pop(key)
         self.environment.update({"VLA": str(ROOT), "LIBERO_HOME": self.temp.name,
                                  "LIBERO_PYTHON": sys.executable, "CONTROL_FREQ": "20"})
@@ -58,6 +80,18 @@ class RTCShellTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(setting + " must be auto", result.stderr)
                 self.assertNotIn("LIBERO evaluation:", result.stdout)
+
+    def test_removed_environment_options_require_explicit_migration(self):
+        for setting, value in (("RTC_GUIDANCE_BETA", "5"), ("RTC_INPAINTING", "true"), ("RTC_INPAINTING", "false")):
+            with self.subTest(setting=setting, value=value):
+                result = self.run_shell(**{setting: value})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(setting + " has been removed", result.stderr)
+                self.assertNotIn("LIBERO evaluation:", result.stdout)
+        result = self.run_shell(RTC_TIMEOUT="10")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RTC_TIMEOUT has been renamed to INFERENCE_TIMEOUT", result.stderr)
+        self.assertNotIn("LIBERO evaluation:", result.stdout)
 
     @unittest.skipUnless(HAS_TYRO, "tyro is an evaluation CLI dependency")
     def test_shell_passes_default_auto_and_explicit_manual_settings_to_tyro(self):
@@ -85,6 +119,11 @@ class RTCShellTests(unittest.TestCase):
                 parsed = json.loads(result.stdout.splitlines()[-1])
                 self.assertEqual((parsed["rtc_stride"], parsed["rtc_delay"]), (stride, delay))
                 self.assertTrue(parsed["rtc_enabled"])  # Preserve the existing shell default.
+                self.assertEqual(parsed["rtc_beta"], 5.0)
+                self.assertNotIn("rtc_guidance_beta", parsed)
+                self.assertNotIn("rtc_inpainting", parsed)
+                self.assertNotIn("rtc_timeout", parsed)
+                self.assertEqual(parsed["inference_timeout"], 10.0)
 
 
 if __name__ == "__main__":

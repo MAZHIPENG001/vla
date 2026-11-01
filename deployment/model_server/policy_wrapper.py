@@ -166,7 +166,7 @@ class PolicyServerWrapper:
             if not getattr(self._framework, "supports_rtc_inpainting", False):
                 raise ValueError(
                     f"{type(self._framework).__name__} does not support RTC prefix inpainting; "
-                    "disable rtc_inpainting to use asynchronous chunk blending."
+                    "set RTC_ENABLED=false to use the original evaluation path."
                 )
             prefix = np.asarray(rtc["prefix_actions"], dtype=np.float32)
             if prefix.ndim != 3 or prefix.shape[0] != len(examples):
@@ -178,7 +178,7 @@ class PolicyServerWrapper:
             if isinstance(delay, bool) or not isinstance(delay, (int, np.integer)) or delay < 0:
                 raise ValueError("RTC delay must be a non-negative integer")
             if not np.isfinite(beta) or beta <= 0:
-                raise ValueError("RTC guidance beta must be finite and positive")
+                raise ValueError("RTC beta (paper Eq. 2 clipping bound) must be finite and positive")
             normalized_prefix = np.stack([proc.apply_actions(p) for p in prefix], axis=0)
             kwargs["rtc"] = {
                 "prefix_actions": normalized_prefix,

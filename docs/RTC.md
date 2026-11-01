@@ -1,193 +1,129 @@
-# LIBERO RTC 异步控制
+# LIBERO RTC：按论文实现
 
-实现依据为仓库内的 [RTC 论文](RTC.pdf)第 3 节、式 (2)–(5) 及 Algorithm 1。Python 参数默认关闭 RTC；现有 `eval_libero.sh` 默认启用 RTC。开启后 stride 和 delay 默认根据推理的实际控制周期延迟自动推导，无需手动指定。不修改训练、权重、训练数据、图像预处理、state 输入、夹爪编码或 LIBERO 环境配置。
+实现依据为本仓库 [RTC.pdf](RTC.pdf) 第 3 节的式 (2)–(5)、Algorithm 1 和附录 A.5。RTC 的连续性由 Flow Matching 采样中的前缀条件生成实现。新结果返回后按时间索引替换当前 chunk，不再对两个模型输出做额外线性插值。
 
-## 原有等待帧的原因
+此前版本将输出融合权重命名为 `RTC_BETA`，另加 `RTC_GUIDANCE_BETA`，并根据预测延迟设置请求门槛；这些是论文之外的设计，现已移除。现在只有一个 β：论文式 (2) 的 guidance weight clipping，默认值为附录表 4 中的 5。
 
-原有调用链：
+## 参数与论文符号
 
-```text
-eval_libero._run_episode
-  → ModelClient.needs_inference(policy_step)
-  → executor.submit(ModelClient.step, example, policy_step)
-    → WebsocketClientPolicy.predict_action
-      → WebsocketPolicyServer._route_message
-        → PolicyServerWrapper.predict_action
-          → framework.predict_action
-```
+| 论文符号 | 本项目来源 | 含义 |
+| --- | --- | --- |
+| H | 服务端 metadata 的 `action_chunk_size` | 预测动作长度，来自模型配置，不在客户端硬编码 |
+| s_min | `rtc_stride` / `RTC_STRIDE` | Algorithm 1 第 13 行的最小执行长度；`auto` 采用 1，也可显式设置正整数 |
+| s | 提交请求时实际经过的控制步 | Algorithm 1 第 14 行，等于请求控制步减当前 chunk 起点；不是额外的调参项 |
+| d_init | `rtc_delay` / `RTC_DELAY` | `auto` 从首次普通推理测量；数字只作为初始延迟种子 |
+| d | 最近 b 次实际延迟的最大值 | Algorithm 1 第 17 行，每次提交新请求时计算，用于前缀 mask |
+| β | `rtc_beta` / `RTC_BETA`，默认 5 | 式 (2) 的引导上限，不是输出插值比例，也不限制在 [0,1] |
+| b | 控制器内的 10 项延迟窗口 | 按附录表 4 的真实机器人设置 |
+| n | 模型配置 `num_inference_timesteps` | Flow Matching Euler 采样步数，复用当前权重对应的动作头配置 |
 
-`ModelClient.needs_inference()` 仅在没有缓存，或 `policy_step % action_chunk_size == 0` 时请求模型。因此下一次推理是在旧 chunk 消耗完后才发起。`_run_episode()` 在 Future 尚未完成时没有可消费的动作，执行六维机械臂零增量并保留上一夹爪命令。`policy_step` 只在消费预测动作时递增，仿真控制时间仍在递增，等待帧由此产生。RTC 关闭时继续走这条路径。
+表 4 的 π0.5 实验使用 n=5、H=50、s_min=25。它们是该实验的设置，不是 Algorithm 1 对所有模型的固定常数。本项目复用 QwenPI 的 H 和 n；`RTC_STRIDE=auto` 取 s_min=1，以保留无需人工指定请求间隔的入口。s_min 是响应速度/计算负载的选择，不能从推理耗时唯一反推出任务最优值；实际 s 则按论文随串行推理的真实延迟自然变化。
 
-## 配置与启动
+除上述算法设置外，`RTC_ENABLED` 是部署开关，`INFERENCE_TIMEOUT` 是通用请求超时保护，不是 RTC 论文的超参数。Python 参数默认关闭 RTC；现有 `eval_libero.sh` 默认启用 RTC。它们均不改变训练、权重、数据、图像处理、state 格式、夹爪编码和 LIBERO 环境配置。
 
-先按原流程启动模型服务，然后使用原来的脚本：
+## 启动与旧配置迁移
+
+按原流程启动更新后的模型服务，再使用原脚本。stride、delay 和 β 均可省略：
 
 ```bash
 LIBERO_HOME=/path/to/LIBERO \
 LIBERO_PYTHON=/path/to/python \
 CKPT=/path/to/checkpoints/steps_100000_pytorch_model.pt \
 HOST=127.0.0.1 PORT=6694 \
-RTC_ENABLED=true RTC_BETA=0.5 \
-RTC_INPAINTING=true RTC_GUIDANCE_BETA=5.0 RTC_TIMEOUT=10 \
+RTC_ENABLED=true \
 bash examples/LIBERO/eval_files/eval_libero.sh
 ```
 
-| 含义 | Python 参数 | 脚本环境变量 | 默认值 |
-| --- | --- | --- | --- |
-| 开关 | `rtc_enabled` | `RTC_ENABLED` | Python `False`；脚本 `true` |
-| H，预测 chunk 长度 | 服务端 metadata `action_chunk_size` | 无客户端覆盖 | 从权重配置获取 |
-| s，最小请求间隔，单位控制周期 | `rtc_stride` | `RTC_STRIDE` | `auto`，或手动正整数 |
-| d，延迟估计，单位控制周期 | `rtc_delay` | `RTC_DELAY` | `auto`，或手动初始非负整数 |
-| β，输出融合时旧动作的初始权重 | `rtc_beta` | `RTC_BETA` | `0.5` |
-| 采样阶段前缀约束 | `rtc_inpainting` | `RTC_INPAINTING` | `True` |
-| 论文式 (2) 的 guidance 上限 β | `rtc_guidance_beta` | `RTC_GUIDANCE_BETA` | `5.0` |
-| 单次请求超时，秒 | `rtc_timeout` | `RTC_TIMEOUT` | `10.0` |
-
-`rtc_beta` 与论文的 guidance clipping β 是两个不同的参数。前者控制额外的输出融合；后者控制采样时的前缀引导强度。仅评估论文式采样约束时可以设 `RTC_BETA=0`。
-
-RTC 需要 `REALTIME=true`、`0 ≤ rtc_beta ≤ 1`，guidance 上限和 timeout 必须为有限正数。手动指定的 s 必须满足 `0 < s < H`，手动初始 d 必须满足 `0 ≤ d < H`；自动估计如实保留实际延迟，即使测得 d 已超过 H，也不会把它伪装成较小延迟。
-
-### 自动推导 stride 和 delay
-
-`RTC_STRIDE`、`RTC_DELAY` 默认为 `auto`，也可以显式设置：
+完整的算法配置入口只有：
 
 ```bash
-RTC_STRIDE=auto RTC_DELAY=auto bash examples/LIBERO/eval_files/eval_libero.sh
-```
-
-自动模式的冷启动先提交一个没有动作前缀的普通请求，等待期间安全保持。第一批结果在主线程被发现可用时，测量 `d_k = return_control_step - request_control_step`。此后始终保存最近 10 次观测到的控制周期延迟，用其最大值作为下一次的 `d_hat`，同时用于前缀 inpainting 的 mask 与自动请求间隔。冷启动前不需要猜测推理耗时；实际延迟覆盖客户端预处理、网络、服务端推理和主线程发现结果的时间，不使用服务端毫秒数替代真实控制步。
-
-自动 stride 采用优先快速响应的策略：
-
-```text
-candidate = max(1, d_hat)
-s = candidate  , candidate + d_hat ≤ H
-s = 1          , candidate + d_hat > H
-```
-
-常规情况下该选择满足论文工作区域 `d_hat ≤ s ≤ H-d_hat`（零周期延迟时最少隔一个控制周期）。例如 H=16、最近实测最大延迟为 3 时，自动使用 s=3。延迟升高会立即调整，延迟下降则在较慢样本移出 10 项窗口后调整。
-
-如果 `candidate + d_hat > H`，单个在途请求的串行推理无法保证连续供应动作。控制器会警告、将请求门槛降为 1，尽早利用最新观测补充动作；不会重复提交在途请求，也不宣称能够消除由此产生的等待帧。缓存耗尽时仍执行安全保持。每次真正提交前还会检查剩余前缀容量，动作索引始终以实际控制步对齐。
-
-保留手动与混合模式：
-
-```bash
-RTC_STRIDE=4 RTC_DELAY=2 bash examples/LIBERO/eval_files/eval_libero.sh
-RTC_STRIDE=4 RTC_DELAY=auto bash examples/LIBERO/eval_files/eval_libero.sh
-RTC_STRIDE=auto RTC_DELAY=2 bash examples/LIBERO/eval_files/eval_libero.sh
-```
-
-手动 stride 保持指定的最小请求间隔。手动 delay 沿用原行为：只作为 10 项历史窗口的初始种子，后续继续根据实测延迟更新，不固定实际动作对齐偏移。Episode reset 会清空历史；自动 delay 重新等待首批测量，手动 delay 重新加载该种子。
-
-对 OFT 或未声明前缀采样能力的模型，使用：
-
-```bash
-RTC_ENABLED=true RTC_INPAINTING=false \
-LIBERO_HOME=/path/to/LIBERO \
+RTC_ENABLED=true RTC_STRIDE=auto RTC_DELAY=auto RTC_BETA=5 \
 bash examples/LIBERO/eval_files/eval_libero.sh
 ```
 
-这一模式提供异步 chunk 对齐和输出融合，不属于完整的 flow inpainting RTC。请求不支持的前缀约束时会明确报错，不会静默退化。
+手动设置 `RTC_STRIDE=4` 表示 s_min=4；`RTC_DELAY=2` 表示 d_init=2。两项可各自独立采用 `auto` 或数字。始终只有一个在途推理，实际动作对齐不使用 d_init 或预测 d 替代真实控制步。
 
-## 控制时间与实际时序
+旧配置需要显式迁移，脚本发现旧变量会报错，不会静默忽略：
 
-全部时间索引采用 episode 内的整数控制步。主线程在控制步 `t` 读取观测，在执行该步动作前处理已完成的推理。只有主线程可以调用 `env.step()`、读取 LIBERO 渲染缓存或生成视频帧。工作线程只运行纯模型请求。
+* 删除 `RTC_GUIDANCE_BETA`，用 `RTC_BETA` 设置论文中的 β。
+* 删除 `RTC_INPAINTING`。开启 RTC 就执行前缀引导；不支持该能力的模型使用 `RTC_ENABLED=false`。
+* 将 `RTC_TIMEOUT` 改为 `INFERENCE_TIMEOUT`，对应 Python 的 `inference_timeout`。默认 10 秒，仅用于请求与清理的时间上限。
+* 旧 `RTC_BETA=0.5` 的“输出融合比例”含义已取消。若继续传 0.5，它表示论文的 guidance clipping β=0.5；默认设置应省略该变量或使用 5。
 
-RTC 路径为 `eval_libero._run_rtc_episode()` → `rtc_controller.RTCController.next_action(example, control_step)` → 工作线程中的 `ModelClient.predict_chunk()`。`RTCConfig` 验证配置，控制器管理本 episode 的 chunk、Future 和统计；原有 `ModelClient.step()` 缓存不参与 RTC。
+RTC 要求 `REALTIME=true`。手动 s_min 满足 `0 < s_min < H`，手动 d_init 满足 `0 ≤ d_init < H`；β 与请求超时必须为有限正数。
 
-需要区分：
+## Algorithm 1 的控制时序
 
-* `t`：全局控制步，即将执行的动作时刻。
-* `r`：推理提交时的全局控制步，也是正常后续 chunk 的时间起点。
-* `a`：主线程首次发现推理已完成的控制步。
-* `a-r`：该次请求实际经历的控制周期数，可能与估计 d 不同。
-* `t-r`：新 chunk 在当前控制步对应的模型动作索引。
+原有等待帧来自 `_run_episode()` → `ModelClient.needs_inference(policy_step)` → `ModelClient.step()`：旧缓存耗尽后才请求下一批动作，Future 未完成时执行零增量保持。RTC 关闭后仍使用这条原有路径。
 
-首个 chunk 尚未返回时安全保持。因为此时没有旧动作前缀，首个 chunk 在返回时建立执行起点，然后从动作 0 开始；这是静止启动的初始化步骤。所有后续请求严格以提交控制步为 chunk 起点。
+RTC 使用 `_run_rtc_episode()` → `RTCController.next_action()` → 后台 `ModelClient.predict_chunk()`。主线程负责 `env.step()`、观测快照和渲染，工作线程只执行模型请求。控制器是 Algorithm 1 的单在途请求实现：
 
-例：服务端 `H=16`、手动指定 `s=4`，首个 chunk 起点为 `t=3`。在 `t=7` 发起下次请求，旧 chunk 索引为 4。若请求在 `t=9` 返回，期间 `t=7,8` 继续执行旧动作索引 4、5；切换时新动作从索引 `9-7=2` 开始，并与旧动作索引 6 对齐。新动作索引 0、1 已经过期，永不补执行。下一次请求最早发生在上一请求起点经过当前 s 步之后，并且始终最多只有一个请求在途；自动模式会随延迟窗口更新 s。
+1. 首批无前缀推理建立论文所需的初始 chunk；等待时安全保持。初始 chunk 在返回时建立起点，并由这次请求测量自动 d_init。
+2. 当前控制步相对当前 chunk 起点的偏移达到 s_min 且没有在途请求时，提交下一次推理。将这个实际偏移记为 s，捕获 `A_prev = A_cur[s:H]` 以及该时刻观测。
+3. 用最近 b 次实际控制周期延迟的最大值预测 d。新 chunk 在后台按式 (2)–(5) 生成，前台继续执行当前 chunk。
+4. 请求在全局控制步 r 提交，主线程在控制步 a 发现结果可用，则实际延迟为 `a-r`。替换为新 chunk 后，当前索引为 `a-r`，对应 Algorithm 1 第 20–22 行；新 chunk 的起点为 r。
+5. 替换后如相对新 chunk 的偏移已达到 s_min，可立即提交下一次请求。因此正常连续运行时，实际 s 自然受 `max(s_min, 前次实际推理延迟)` 约束。
 
-返回时若 `t-r ≥ H`，整个 chunk 都已过期，必须丢弃并用最新观测重试。若延迟估计超过剩余前缀容量，则对 mask 长度截断并警告。延迟估计用于前缀约束与请求调度，不参与动作对齐。若一次请求延迟已达到当前 s，收到结果后可立即发起下一次请求，此时实际请求间隔受真实推理耗时限制，可能大于 s。
+例如 H=16、s_min=1，初始 chunk 在控制步 3 开始执行。在控制步 4 提交新推理，此时 s=1，剩余前缀长度 K=15。如果结果在控制步 7 可用，控制步 4、5、6 仍执行旧动作；控制步 7 直接执行新 chunk 的索引 3。随后可以在控制步 7 再次请求，新的实际 s=3。不会补执行已经过期的新动作 0、1、2。
 
-## 输出重叠融合
+延迟预测只用于生成约束，不再将其代入额外的 stride 公式，也不根据预测延迟切换成另一种调度策略。实际延迟下降时，实际请求间隔可随前次推理变短；保守的 d 预测则需等待较慢样本移出窗口后下降。Reset 会清空窗口，数字 d_init 则重新作为初始种子加载。
 
-设新 chunk 返回时仍有 L 个与旧 chunk 时间对齐的未来动作，`j=0,…,L-1`。旧动作权重及融合为：
+## 式 (2)–(5) 的前缀引导
+
+模型调用链为：
 
 ```text
-w_old(j) = rtc_beta · (L-j)/L
-a(j) = w_old(j) · a_old(j) + (1-w_old(j)) · a_new(j)
+ModelClient.predict_chunk
+  → WebsocketClientPolicy.predict_action
+    → WebsocketPolicyServer._route_message
+      → PolicyServerWrapper.predict_action
+        → Qwen_PI.predict_action
+          → LayerwiseFlowmatchingActionHead.predict_action
+            → 每个 Euler 步的 ΠGDM 引导
 ```
 
-权重只用于重叠的未来区间，过期动作不参与融合，重叠之后直接使用新动作。
+客户端传输请求时刻剩余的旧模型动作原值 `[B,K,D]`。服务端使用该权重训练时的 `PolicyNormProcessor` 将动作前缀归一化，输出沿用原反归一化路径。前缀不额外二值化夹爪、不混合位置或旋转；LIBERO 最终夹爪编码仍由原来的环境适配代码处理。
 
-* 位置：对同一控制时刻的三维增量线性融合。
-* 旋转：LIBERO OSC_POSE 接收每周期的旋转增量控制坐标，因此在该增量/切空间内线性融合；不是对绝对欧拉角做平均，也不是把控制器缩放过的命令当作绝对姿态做 SLERP。
-* 夹爪：保持原来的 open/close 编码和二值化阈值。按较大权重选择旧或新命令，`w_old ≥ 0.5` 时选旧值；不产生夹爪中间命令。
-
-输出融合只是连续性启发式，不能证明任意多模态动作平均仍然有效。真正的前缀条件生成在以下 PI Flow Matching 采样中完成。
-
-## PI Action Prefix Inpainting
-
-QwenPI 调用链继续进入：
+在论文有效区域中，K=H-s、d≤K。式 (5) 为：
 
 ```text
-Qwen_PI.predict_action
-  → LayerwiseFlowmatchingActionHead.predict_action
-    → 每个 Flow Matching Euler 采样步骤中的 ΠGDM 引导
+W_i = 1                                   , i < d
+W_i = c_i · (exp(c_i)-1)/(e-1)             , d ≤ i < H-s
+W_i = 0                                   , i ≥ H-s
+c_i = (H-s-i)/(H-s-d+1)
 ```
 
-请求捕获旧 chunk 在请求时刻起的剩余动作作为 `prefix_actions`，维度为 `[B,K,D]`。K 为实际重叠长度，不硬编码 H。前缀传输使用环境动作坐标，由服务端 `PolicyNormProcessor` 按该权重原有训练变换归一化，随后才进入模型。模型输出仍通过原有反归一化路径转换回环境动作。前缀中的夹爪使用模型原始编码，不使用 LIBERO 最终 `-1/+1` 命令编码。
-
-右侧补齐到 H 后，按论文式 (5) 构造每个时刻的权重，并广播到动作维：
+W 在动作维上广播；旧动作右补齐到 H，作为 Y。每个采样时刻 τ 执行：
 
 ```text
-d' = min(estimated_delay, K)
-W_i = 1                                      , i < d'
-W_i = c_i · (exp(c_i)-1)/(e-1)                , d' ≤ i < K
-W_i = 0                                      , i ≥ K
-c_i = (K-i)/(K-d'+1)
-```
-
-其中 K 对应论文的 `H-s`。对每个采样时间 `τ`：
-
-```text
-A_hat = A_tau + (1-τ) · v(A_tau, observation, τ)
-e = (prefix_target - A_hat) · W
-g = VJP(A_hat, A_tau, e)
+f(A_tau) = A_tau + (1-τ) · v(A_tau, observation, τ)
+e = (Y - f(A_tau)) · W
+g = J_f(A_tau)^T · e
 r² = (1-τ)² / (τ² + (1-τ)²)
-λ = min(rtc_guidance_beta, (1-τ)/(τ · r²))
-A_next = A_tau + Δτ · (v + λ · g)
+λ = min(β, (1-τ)/(τ · r²))
+A_next = A_tau + (1/n) · (v + λ · g)
 ```
 
-`τ=0` 时将无穷上限取为 `rtc_guidance_beta`。VJP 在采样阶段通过自动微分计算，仅对当前动作轨迹求导，不更新模型参数。图像和 state 的处理沿用原路径。关闭前缀约束时仍使用原始 Euler 采样。
+τ=0 时以 β 作为截断后的引导系数。通过完整 endpoint VJP 对当前动作求导，包括速度场对动作的导数；不更新模型参数，不对 VLM 回传梯度。前缀误差可以影响未掩码的后续动作，保证约束发生在生成过程中。
 
-这实现了论文的训练外 ΠGDM 前缀约束，不是生成结束后覆盖动作。论文也指出有限采样步和受限 guidance 下，生成的前缀不保证与旧前缀逐元素完全相等；已承诺的动作仍由客户端旧 chunk 执行，不会拿新生成的过期前缀替换已经执行的动作。
+论文第 3.2 节说明有限步 ΠGDM 并不保证生成前缀逐元素严格相等。实际已经承诺的动作仍由旧 chunk 执行；返回后直接替换生成结果，不再增加输出平均、插值、SLERP 或生成后前缀覆盖。
 
-当前能力范围：
+## 模型支持与有效范围之外的保护
 
-| 模型 | 异步对齐/输出融合 | 采样阶段前缀约束 |
-| --- | --- | --- |
-| QwenPI + LayerwiseFM Action Head | 支持 | 支持论文式 (2)–(5) |
-| QwenOFT 等直接回归模型 | 支持 | 不支持：没有迭代 flow 采样速度场及其动作 VJP |
-| 其他 Flow Matching head/framework | 支持 | 尚未接入：需为其采样循环和条件特征启用动作 VJP，并显式声明能力 |
+QwenPI + LayerwiseFM 已接入所需速度场和动作 VJP。OFT 等直接回归模型没有该采样过程，其他尚未接入的 Flow Matching 框架也不声明支持。它们开启 RTC 会报错，应使用 `RTC_ENABLED=false` 保持原有测评。不存在“关闭 inpainting 仍作为 RTC”的模式。
 
-## 异常、终止与日志
+论文连续供给的工作区域为 `d ≤ s ≤ H-d`。突发延迟或过短 H 可能使真实运行超出该区域；不能通过压低延迟估计、重放动作或输出插值宣称仍满足论文保证。部署层保留以下保护：
 
-首帧等待或旧 chunk 耗尽时，使用机械臂零增量并保持最后夹爪命令。绝不无限重复旧 chunk 的最后一个运动动作。推理错误和超时向上抛出，不能当作空结果忽略。
+* 首批等待或缓存耗尽时执行机械臂零增量，并保持最后夹爪命令。
+* 返回时若 `a-r ≥ H`，丢弃整批过期动作，使用最新观测重试。
+* 若预测 d 超过剩余前缀长度，告警并只约束可用的旧动作；保留真实估计与真实对齐索引。这属于越界运行的保护，不是论文有效区域内的新算法。
+* 请求失败、超时和 Episode 清理失败向外抛出。结束、提前成功和 reset 都清理在途状态；旧 Episode 的结果不能进入下一轮。
 
-episode 的 Future、chunk、时间索引均单独创建，结束或提前成功后清理在途请求；工作线程不修改跨 episode 的动作缓存。清理完成后才允许下个 episode 使用连接，防止上个 episode 的结果进入下一轮。
+## 日志与测试
 
-超时同时覆盖主线程轮询期限、工作线程实际完成时间和 WebSocket 接收等待。即使结果在较晚的控制步已完成，也不能绕过请求总期限；按时完成但被较晚轮询的结果仍以真实控制索引判断是否过期。reset 清理失败后禁止复用该控制器，连接接收超时后也禁止复用。
+日志记录请求耗时 `inference_ms`、实际控制周期延迟 `delay_steps`、预测延迟 `estimated_delay_steps`、实际执行长度 `execution_horizons`、等待帧、缓存耗尽和过期 chunk，并保留 LIBERO 成功率。`execution_horizons` 对应每次提交时的实际 s；初始无前缀请求记为 0，不算论文的正常重规划阶段。请求日志还记录 s_min 和 H。
 
-日志包含请求耗时 `inference_ms`（毫秒）、实际控制周期延迟 `delay_steps`、等待帧 `wait_steps`、已消费的融合动作数 `blend_actions`、缓存耗尽次数 `buffer_exhaustions`、过期 chunk 数 `stale_chunks` 和请求数 `requests`，并保留原有 LIBERO 任务和总体成功率。控制循环落后实时周期时会警告，因为这时相同墙钟延迟对应的控制周期数会减少。
-
-每次请求还记录生效的延迟估计 `estimated_delay_steps` 和请求门槛 `request_strides`，并记录配置模式、当前估计、stride 和 H。`request_strides` 是计划门槛，不代表在途推理一定能在该间隔内完成；实际延迟仍以 `delay_steps` 为准。
-
-`inference_ms` 为客户端完整模型请求耗时；服务端同时记录 `server_inference_ms`，不含客户端预处理和网络往返。episode 结束后 drain 完成的请求单独记录耗时和终止前实际控制周期数，不将清理墙钟时间换算为仿真控制步，也不加入用于后续切换的 `delay_steps`。
-
-## 验证范围
-
-测试使用可控时钟、模拟模型/环境和 CPU 小型 flow 速度场验证：提前请求、在途继续消费、不同延迟的全局索引、融合公式、过期跳过、超时、reset/提前终止隔离、工作线程边界，以及 RTC 关闭后的既有行为。
+客户端模型请求耗时包含预处理和网络，服务端另记录 `server_inference_ms`。终止后 drain 的墙钟时间不换算成仿真控制步，不污染延迟预测窗口。仿真跟不上实时控制频率时会告警。
 
 ```bash
 python -m unittest discover -s tests -p 'test_*rtc*.py'
@@ -195,6 +131,4 @@ python -m unittest discover -s tests -p 'test_libero_realtime.py'
 bash -n examples/LIBERO/eval_files/eval_libero.sh
 ```
 
-本次验证 58 项测试全部通过且无跳过（原有 43 项、12 项自动调度、3 项 CLI），Python 编译、Shell 语法和 `git diff --check` 通过。自动模式覆盖冷启动测量、零周期延迟、延迟变化与窗口淘汰、超出 horizon、reset 历史清理、手动/混合模式和真实 tyro 参数解析。Shell 参数检查拒绝无效的 auto/数值输入。验证环境缺少的 `msgpack`/`tyro` 仅临时安装到 `/tmp/vla-rtc-deps`，未修改项目环境；评测依赖安装方式沿用 README。
-
-单元测试不等同于实际 LIBERO 成功率或 GPU 性能测量。前缀 VJP 会增加推理显存和延迟，自动模式会随这些变化调整；仍需在目标 GPU、实际模型权重和 LIBERO 安装中测量成功率与耗时并选择 timeout。自动 stride 是优先响应速度的调度策略，不能仅凭耗时推导任务成功率最优的执行频率。若目标 GPU attention 内核不支持所需的反向传播，应选择支持动作 VJP 的 attention 后端，不能以输出拼接代替采样约束。
+本次完整验证 65 项测试全部通过，无跳过；Python 编译、Shell 语法和 `git diff --check` 均通过。测试覆盖 Algorithm 1 的实测 s/d、时间索引、单在途推理、旧动作继续执行、直接替换、完整 VJP 与 mask、归一化、超时、reset、提前成功、CLI 和 RTC 关闭后的回归行为。单元测试不能代替目标 GPU、实际权重和 LIBERO 成功率测量；显存和推理耗时仍需在目标部署环境验证。

@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 from examples.LIBERO.eval_files import eval_libero as evaluation
-from examples.LIBERO.eval_files.rtc_controller import RTCConfig, RTCController, blend_overlap
+from examples.LIBERO.eval_files.rtc_controller import RTCConfig, RTCController
 from test_libero_realtime import Clock, Environment
 
 
@@ -85,7 +85,7 @@ class ControllerTests(unittest.TestCase):
         return result
 
     def test_request_before_exhaustion_and_old_motion_continues(self):
-        ctl, clock, model, executor = self.make_controller(beta=0)
+        ctl, clock, model, executor = self.make_controller()
         actions = self.ticks(ctl, clock, 0, 6)
         self.assertEqual([a[0] for a in actions], [0, 1, 2, 3, 102, 103])
         self.assertEqual([s[0] for s in executor.submissions[:2]], [0, 2])
@@ -94,31 +94,30 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(ctl.stats.wait_steps, 0)
         ctl.close()
 
-    def test_alignment_and_blending_for_different_actual_delays(self):
+    def test_alignment_and_immediate_swap_for_different_actual_delays(self):
         for delay in (0, 1, 2, 5, 6, 7):
             with self.subTest(delay=delay):
                 ctl, clock, _, _ = self.make_controller(delays=(0, delay, 100), beta=0.5)
                 handoff = 2 + delay
                 actions = self.ticks(ctl, clock, 0, handoff + 1)
                 self.assertEqual(ctl.origin, 2)
-                # At handoff both predictions refer to the exact same t.
-                expected = 0.5 * handoff + 0.5 * (100 + delay) if handoff < 8 else 100 + delay
-                self.assertAlmostEqual(actions[-1][0], expected)
+                # Algorithm 1 swaps Acur=Anew with t reset to the actual delay.
+                # No post-sampling weighted average is part of the algorithm.
+                self.assertEqual(actions[-1][0], 100 + delay)
                 self.assertEqual(ctl.stats.delay_steps[-1], delay)
-                self.assertEqual(ctl.stats.blend_actions, int(handoff < 8))
                 ctl.close()
 
-    def test_fusion_decay_position_rotation_and_discrete_gripper(self):
-        old, new = chunk(0, 4), chunk(100, 4)
-        mixed = blend_overlap(old, new, 0.5)
-        weights = np.array([0.5, 0.375, 0.25, 0.125])
-        expected = weights[:, None] * old[:, :6] + (1 - weights[:, None]) * new[:, :6]
-        np.testing.assert_allclose(mixed[:, :6], expected)
-        np.testing.assert_array_equal(mixed[:, 6], [0, 1, 1, 1])
-        np.testing.assert_array_equal(blend_overlap(old, new, 0), new)
+    def test_beta_is_guidance_cap_and_never_interpolates_controller_output(self):
+        for beta in (0.5, 5., 20.):
+            with self.subTest(beta=beta):
+                ctl, clock, model, _ = self.make_controller(beta=beta)
+                actions = self.ticks(ctl, clock, 0, 5)
+                np.testing.assert_array_equal(actions[-1], chunk(100)[2])
+                self.assertEqual(model.calls[1][1]["beta"], beta)
+                ctl.close()
 
     def test_never_replay_expired_prefix_or_entire_expired_chunk(self):
-        ctl, clock, _, _ = self.make_controller(delays=(0, 9, 100), beta=0)
+        ctl, clock, _, _ = self.make_controller(delays=(0, 9, 100))
         actions = self.ticks(ctl, clock, 0, 12)
         self.assertEqual([a[0] for a in actions[:8]], list(range(8)))
         self.assertTrue(all(a is None for a in actions[8:]))
@@ -128,7 +127,7 @@ class ControllerTests(unittest.TestCase):
         ctl.close()
 
     def test_bootstrap_is_stationary_then_initial_chunk_starts_at_zero(self):
-        ctl, clock, _, _ = self.make_controller(delays=(3, 100), beta=0)
+        ctl, clock, _, _ = self.make_controller(delays=(3, 100))
         actions = self.ticks(ctl, clock, 0, 5)
         self.assertEqual(actions[:3], [None] * 3)
         self.assertEqual([a[0] for a in actions[3:]], [0, 1])
@@ -137,7 +136,7 @@ class ControllerTests(unittest.TestCase):
         ctl.close()
 
     def test_prefix_is_remaining_committed_actions_at_request_not_completion(self):
-        ctl, clock, model, executor = self.make_controller(delay=1, guidance_beta=7)
+        ctl, clock, model, executor = self.make_controller(delay=1, beta=7)
         self.ticks(ctl, clock, 0, 5)
         request = executor.submissions[1][1]
         self.assertEqual(request["example"]["lang"], "frame-2")
@@ -147,8 +146,22 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(rtc["beta"], 7)
         ctl.close()
 
+    def test_prefix_preserves_raw_gripper_values_in_policy_coordinates(self):
+        ctl, clock, model, executor = self.make_controller()
+        original_predict = model.predict_chunk
+
+        def predict_fractional_gripper(**kwargs):
+            result = original_predict(**kwargs)
+            result[:, 6] = .35 if len(model.calls) == 1 else .65
+            return result
+
+        model.predict_chunk = predict_fractional_gripper
+        self.ticks(ctl, clock, 0, 5)
+        np.testing.assert_array_equal(executor.submissions[1][1]["rtc"]["prefix_actions"][..., 6], np.float32(.35))
+        ctl.close()
+
     def test_reset_drains_then_clears_actions_and_pending_state(self):
-        ctl, clock, model, executor = self.make_controller(delays=(0, 2, 0), beta=0)
+        ctl, clock, model, executor = self.make_controller(delays=(0, 2, 0))
         self.ticks(ctl, clock, 0, 3)
         self.assertIsNotNone(ctl.pending)
         ctl.reset()
@@ -213,7 +226,11 @@ class ControllerTests(unittest.TestCase):
         model.supports_rtc_inpainting = False
         with self.assertRaisesRegex(ValueError, "does not support"):
             RTCController(model, RTCConfig())
-        for config in (RTCConfig(stride=8), RTCConfig(stride=0), RTCConfig(delay=8), RTCConfig(beta=float("nan"))):
+        self.assertEqual(model.calls, [])
+        self.assertEqual(RTCConfig().beta, 5.)
+        RTCConfig(beta=20.).validate(8)
+        for config in (RTCConfig(stride=8), RTCConfig(stride=0), RTCConfig(delay=8),
+                       RTCConfig(beta=0), RTCConfig(beta=-1), RTCConfig(beta=float("nan"))):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 RTCController(ChunkModel(), config)
 
@@ -230,7 +247,7 @@ class EpisodeTests(unittest.TestCase):
             return ctl
 
         args = evaluation.Args(num_steps_wait=0, control_freq=1, rtc_enabled=True, rtc_stride=2,
-                               rtc_beta=0, rtc_timeout=1000)
+                               inference_timeout=1000)
         with (
             patch.object(evaluation.time, "monotonic", clock.monotonic),
             patch.object(evaluation.time, "sleep", clock.sleep),
@@ -276,7 +293,7 @@ class EpisodeTests(unittest.TestCase):
                 return result
 
         model, env = GatedModel(), ReleasingEnv()
-        args = evaluation.Args(num_steps_wait=0, control_freq=100, rtc_enabled=True, rtc_stride=2, rtc_beta=0)
+        args = evaluation.Args(num_steps_wait=0, control_freq=100, rtc_enabled=True, rtc_stride=2)
         frames, _ = evaluation._run_episode(env, model, env.obs(), "task", args, 18)
         self.assertEqual(len(frames), 18)
         self.assertEqual(set(env.threads), {threading.get_ident()})

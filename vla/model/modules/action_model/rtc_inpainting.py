@@ -27,6 +27,11 @@ def rtc_prefix_weights(
     submission.  The first ``delay`` available actions have weight one; the
     remaining overlap decays exponentially, and the new tail has weight zero.
     An underestimated delay affects guidance, never the controller's indexing.
+
+    Equation 5 assumes ``delay <= overlap``. If inference exceeds that supply
+    budget, the controller warns and holds after exhausting its old actions.
+    Here only available old rows can be constrained; this bounded mask is an
+    exhaustion fallback, not an extension of the paper's continuity guarantee.
     """
     if not isinstance(horizon, Integral) or horizon <= 0:
         raise ValueError("RTC horizon must be a positive integer")

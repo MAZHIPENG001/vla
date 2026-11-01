@@ -13,14 +13,26 @@ NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-2}"
 REALTIME="${REALTIME:-true}"
 # Simulation control frequency and replay FPS.
 CONTROL_FREQ="${CONTROL_FREQ:-20}"
-# H comes from server metadata; stride and delay adapt to measured control cycles.
+# Algorithm 1: H comes from metadata, stride is s_min, delay seeds the delay buffer.
 RTC_ENABLED="${RTC_ENABLED:-true}"
 RTC_STRIDE="${RTC_STRIDE:-auto}"
 RTC_DELAY="${RTC_DELAY:-auto}"
-RTC_BETA="${RTC_BETA:-0.5}"
-RTC_INPAINTING="${RTC_INPAINTING:-true}"
-RTC_GUIDANCE_BETA="${RTC_GUIDANCE_BETA:-5.0}"
-RTC_TIMEOUT="${RTC_TIMEOUT:-10.0}"
+RTC_BETA="${RTC_BETA:-5.0}"
+# Deployment timeout, not a parameter of the paper's RTC algorithm.
+INFERENCE_TIMEOUT="${INFERENCE_TIMEOUT:-10.0}"
+
+if [[ -v RTC_GUIDANCE_BETA ]]; then
+  echo "RTC_GUIDANCE_BETA has been removed; use RTC_BETA for the paper's guidance clipping beta and unset RTC_GUIDANCE_BETA." >&2
+  exit 1
+fi
+if [[ -v RTC_INPAINTING ]]; then
+  echo "RTC_INPAINTING has been removed; RTC always uses the paper's prefix inpainting. Unset RTC_INPAINTING; use RTC_ENABLED=false for unsupported models." >&2
+  exit 1
+fi
+if [[ -v RTC_TIMEOUT ]]; then
+  echo "RTC_TIMEOUT has been renamed to INFERENCE_TIMEOUT; unset RTC_TIMEOUT. This is a transport safety setting, not a paper RTC hyperparameter." >&2
+  exit 1
+fi
 
 case "${REALTIME}" in
   true|1) REALTIME_ARGS=(--args.realtime) ;;
@@ -35,14 +47,6 @@ case "${RTC_ENABLED}" in
   false|0) RTC_ARGS=(--args.no-rtc-enabled) ;;
   *)
     echo "RTC_ENABLED must be true, false, 1, or 0." >&2
-    exit 1
-    ;;
-esac
-case "${RTC_INPAINTING}" in
-  true|1) RTC_ARGS+=(--args.rtc-inpainting) ;;
-  false|0) RTC_ARGS+=(--args.no-rtc-inpainting) ;;
-  *)
-    echo "RTC_INPAINTING must be true, false, 1, or 0." >&2
     exit 1
     ;;
 esac
@@ -82,7 +86,7 @@ FOLDER_NAME="$(echo "${CKPT}" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')"
 MODEL_ROOT="$(echo "${CKPT}" | awk -F'/checkpoints/' '{print $1}')"
 VIDEO_OUT_PATH="${MODEL_ROOT}/results/${TASK_SUITE_NAME}/${FOLDER_NAME}"
 
-echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, rtc=${RTC_ENABLED}, stride=${RTC_STRIDE}, delay=${RTC_DELAY}, inpainting=${RTC_INPAINTING}"
+echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, rtc=${RTC_ENABLED}, s_min=${RTC_STRIDE}, initial_delay=${RTC_DELAY}, beta=${RTC_BETA}"
 "${LIBERO_PYTHON}" ./examples/LIBERO/eval_files/eval_libero.py \
   --args.pretrained-path "${CKPT}" \
   --args.host "${HOST}" \
@@ -94,7 +98,6 @@ echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, 
   --args.rtc-stride "${RTC_STRIDE}" \
   --args.rtc-delay "${RTC_DELAY}" \
   --args.rtc-beta "${RTC_BETA}" \
-  --args.rtc-guidance-beta "${RTC_GUIDANCE_BETA}" \
-  --args.rtc-timeout "${RTC_TIMEOUT}" \
+  --args.inference-timeout "${INFERENCE_TIMEOUT}" \
   "${RTC_ARGS[@]}" \
   "${REALTIME_ARGS[@]}"
