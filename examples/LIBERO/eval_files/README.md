@@ -11,7 +11,20 @@
 
 例如，20 Hz 下推理耗时约 0.2 秒，会对应约 4 个重复上一动作的仿真步，实际步数会受请求完成时间与控制周期边界影响。`libero_goal` 的 300 步预算对应 15 秒仿真时间，其中包括推理等待。位移和旋转是增量命令，因此重复上一动作会继续执行该运动。
 
-现有 shell 入口直接使用以上默认行为。直接运行 Python 时可用：
+`eval_libero.sh` 显式传入实时开关和控制频率，支持环境变量 `REALTIME=true|false`（也接受 `1|0`）与 `CONTROL_FREQ`（正整数，单位 Hz）。沿用已配置的 `LIBERO_HOME`、`LIBERO_PYTHON` 等变量即可：
+
+```bash
+# 默认实时评测，20 Hz。
+bash examples/LIBERO/eval_files/eval_libero.sh
+
+# 显式设置实时评测和控制频率。
+REALTIME=true CONTROL_FREQ=20 bash examples/LIBERO/eval_files/eval_libero.sh
+
+# 同步评测，推理期间暂停仿真。
+REALTIME=false bash examples/LIBERO/eval_files/eval_libero.sh
+```
+
+其他 shell 入口沿用 Python 默认行为。直接运行 Python 时可用：
 
 ```bash
 # 修改控制频率，同时修改环境控制频率和视频 FPS。

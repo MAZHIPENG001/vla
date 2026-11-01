@@ -3,7 +3,7 @@ set -euo pipefail
 
 VLA_DIR="${VLA_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 VLA_PYTHON="${VLA_PYTHON:-python}"
-CKPT="${CKPT:-${VLA_DIR}/playground/Pretrained_models/StarVLA/Qwen3-VL-OFT-LIBERO-4in1/checkpoints/steps_50000_pytorch_model.pt}"
+CKPT="${CKPT:-${VLA_DIR}/playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt}"
 GPU_ID="${GPU_ID:-7}"
 PORT="${PORT:-6694}"
 USE_BF16="${USE_BF16:-1}"

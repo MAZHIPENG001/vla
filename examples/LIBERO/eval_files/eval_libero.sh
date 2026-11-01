@@ -9,6 +9,22 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-6694}"
 TASK_SUITE_NAME="${TASK_SUITE_NAME:-libero_goal}"
 NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-5}"
+# Repeat the last complete action while inference runs; also sets replay FPS.
+REALTIME="${REALTIME:-true}"
+CONTROL_FREQ="${CONTROL_FREQ:-20}"
+
+case "${REALTIME}" in
+  true|1) REALTIME_ARGS=(--args.realtime) ;;
+  false|0) REALTIME_ARGS=(--args.no-realtime) ;;
+  *)
+    echo "REALTIME must be true, false, 1, or 0." >&2
+    exit 1
+    ;;
+esac
+if [[ ! "${CONTROL_FREQ}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CONTROL_FREQ must be a positive integer (Hz)." >&2
+  exit 1
+fi
 
 MUJOCO_GL_VALUE="${MUJOCO_GL_VALUE:-egl}"
 PYOPENGL_PLATFORM_VALUE="${PYOPENGL_PLATFORM_VALUE:-egl}"
@@ -29,10 +45,13 @@ FOLDER_NAME="$(echo "${CKPT}" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')"
 MODEL_ROOT="$(echo "${CKPT}" | awk -F'/checkpoints/' '{print $1}')"
 VIDEO_OUT_PATH="${MODEL_ROOT}/results/${TASK_SUITE_NAME}/${FOLDER_NAME}"
 
+echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz"
 "${LIBERO_PYTHON}" ./examples/LIBERO/eval_files/eval_libero.py \
   --args.pretrained-path "${CKPT}" \
   --args.host "${HOST}" \
   --args.port "${PORT}" \
   --args.task-suite-name "${TASK_SUITE_NAME}" \
   --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
-  --args.video-out-path "${VIDEO_OUT_PATH}"
+  --args.video-out-path "${VIDEO_OUT_PATH}" \
+  --args.control-freq "${CONTROL_FREQ}" \
+  "${REALTIME_ARGS[@]}"
