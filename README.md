@@ -126,10 +126,14 @@ modelscope download \
     --token "$MODELSCOPE_TOKEN"
 ```
 ### Step 2: Start the policy server (Terminal 1 — starVLA env)
-Edit the checkpoint path in `examples/LIBERO/eval_files/run_policy_server.sh`:
+在项目根目录设置 checkpoint，并用 `--gpu-id` 选择推理卡，无需修改脚本：
 ```bash
-CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
-TRANSFORMERS_VERBOSITY=error bash examples/LIBERO/eval_files/run_policy_server.sh
+conda deactivate
+source .venv/bin/activate
+
+export CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
+TRANSFORMERS_VERBOSITY=error PORT=6694 \
+  bash examples/LIBERO/eval_files/run_policy_server.sh --gpu-id 2
 ```
 state 默认输入模型；启动日志中的 `include_state` 应为 `True`。
 LIBERO 状态为当前帧的 8 维 EEF 位置、axis-angle 旋转向量和双指 qpos。
@@ -138,12 +142,21 @@ LIBERO 状态为当前帧的 8 维 EEF 位置、axis-angle 旋转向量和双指
 ### Step 3: Run evaluation (Terminal 2 — LIBERO env)
 RTC 异步连续控制、PI 前缀 Inpainting 和 `RTC_*` 启动参数见 [LIBERO RTC 使用说明](docs/RTC.md)。
 
-Edit the paths in examples/LIBERO/eval_files/eval_libero.sh, then:
+在第二个终端设置 LIBERO 路径，并选择仿真渲染卡：
 ```bash
-CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
+conda deactivate
+source .venv/bin/activate
+
+export CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
 export LIBERO_HOME=/mnt/data/3dgs/mzp/LIBERO
 export LIBERO_PYTHON="$PWD/.venv/bin/python"
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
-bash examples/LIBERO/eval_files/eval_libero.sh
+PORT=6694 bash examples/LIBERO/eval_files/eval_libero.sh --gpu-id 2
 ```
+
+两个脚本均支持 `--gpu-id N`（也接受 `--gpu-id=N`）或环境变量 `GPU_ID=N`。
+优先级为命令行参数 → `GPU_ID` → `CUDA_VISIBLE_DEVICES` 中的首个 GPU 编号 → `0`。
+例如，也可用 `GPU_ID=2 bash examples/LIBERO/eval_files/run_policy_server.sh`。
+编号填写单张卡的非负整数；推理和仿真可共用 2 号卡，也可分别指定不同卡，两端 `PORT` 必须一致。
+仿真入口同时绑定 CUDA 和 EGL 渲染设备，具体编号说明与直接运行 Python 的用法见 [LIBERO 评测说明](examples/LIBERO/eval_files/README.md)。

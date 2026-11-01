@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/gpu_utils.sh"
+configure_libero_gpu "$@"
+
 VLA="${VLA:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 LIBERO_HOME="${LIBERO_HOME:-}"
 LIBERO_PYTHON="${LIBERO_PYTHON:-python}"
@@ -81,12 +84,15 @@ export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-${LIBERO_HOME}/libero}"
 export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${VLA}"
 export MUJOCO_GL="${MUJOCO_GL_VALUE}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM_VALUE}"
+# robosuite gives this variable priority over both CUDA visibility and the
+# render_gpu_device_id argument, so replace any inherited selection as well.
+export MUJOCO_EGL_DEVICE_ID="${GPU_ID}"
 
 FOLDER_NAME="$(echo "${CKPT}" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')"
 MODEL_ROOT="$(echo "${CKPT}" | awk -F'/checkpoints/' '{print $1}')"
 VIDEO_OUT_PATH="${MODEL_ROOT}/results/${TASK_SUITE_NAME}/${FOLDER_NAME}"
 
-echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, rtc=${RTC_ENABLED}, s_min=${RTC_STRIDE}, initial_delay=${RTC_DELAY}, beta=${RTC_BETA}"
+echo "LIBERO evaluation: GPU_ID=${GPU_ID}, CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, render_gpu_device_id=${GPU_ID}, realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, rtc=${RTC_ENABLED}, s_min=${RTC_STRIDE}, initial_delay=${RTC_DELAY}, beta=${RTC_BETA}"
 "${LIBERO_PYTHON}" ./examples/LIBERO/eval_files/eval_libero.py \
   --args.pretrained-path "${CKPT}" \
   --args.host "${HOST}" \
@@ -94,6 +100,7 @@ echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, 
   --args.task-suite-name "${TASK_SUITE_NAME}" \
   --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
   --args.video-out-path "${VIDEO_OUT_PATH}" \
+  --args.render-gpu-device-id "${GPU_ID}" \
   --args.control-freq "${CONTROL_FREQ}" \
   --args.rtc-stride "${RTC_STRIDE}" \
   --args.rtc-delay "${RTC_DELAY}" \

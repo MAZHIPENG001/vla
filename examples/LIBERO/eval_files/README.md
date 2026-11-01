@@ -1,4 +1,31 @@
-# LIBERO 评测时序
+# LIBERO 评测
+
+## 指定 GPU
+
+推理和仿真入口均可指定单张 GPU，无需编辑脚本。先按主 README 配置 `CKPT`、`LIBERO_HOME` 和 Python 环境，再分别在两个终端运行：
+
+```bash
+# 终端 1：在 2 号卡运行模型推理。
+PORT=6694 bash examples/LIBERO/eval_files/run_policy_server.sh --gpu-id 2
+
+# 终端 2：在 2 号卡进行仿真渲染。
+PORT=6694 bash examples/LIBERO/eval_files/eval_libero.sh --gpu-id 2
+```
+
+也可使用 `--gpu-id=2` 或 `GPU_ID=2 bash ...`，使用 `--help` 查看脚本用法。
+选择优先级为 `--gpu-id` → `GPU_ID` → `CUDA_VISIBLE_DEVICES` 中的首个 GPU 编号 → `0`。
+编号必须是单个非负整数；如服务器只空闲 2、3 号卡，可将推理设为 `--gpu-id 2`，仿真设为 `--gpu-id 3`，保持两端 `HOST`、`PORT` 对应即可。
+
+脚本将所选卡写入 `CUDA_VISIBLE_DEVICES`。推理进程内部以 `cuda:0` 使用该卡；仿真同时设置 `MUJOCO_EGL_DEVICE_ID` 并将原设备编号传给 LIBERO 的 `render_gpu_device_id`，覆盖继承的旧渲染卡设置。
+例如选择 2 号卡时，渲染参数仍为 `2`。直接运行 Python 时同样需要同时指定 CUDA 可见卡和渲染卡：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 MUJOCO_EGL_DEVICE_ID=2 MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
+  python examples/LIBERO/eval_files/eval_libero.py \
+    --args.render-gpu-device-id 2 --args.port 6694
+```
+
+## 评测时序
 
 `eval_libero.py` 默认启用实时评测（`realtime=True`）：
 

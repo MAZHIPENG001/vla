@@ -41,6 +41,7 @@ class Args:
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize in sim.
     num_trials_per_task: int = 50  # Number of rollouts per task
     max_tasks: int = -1  # If > 0, limit the number of tasks evaluated (smoke / quick check). -1 = run all.
+    render_gpu_device_id: int = -1  # Original EGL GPU index, before CUDA_VISIBLE_DEVICES renumbering; -1 = auto.
     realtime: bool = True  # Advance simulation while inference runs in a worker thread.
     control_freq: int = 20  # Simulation control frequency and replay FPS, in Hz.
     rtc_enabled: bool = False  # Preserve the existing rollout when disabled.
@@ -336,7 +337,9 @@ def eval_libero(args: Args) -> None:
             initial_states = task_suite.get_task_init_states(task_id)
 
             # Initialize LIBERO environment and task description
-            env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed, args.control_freq)
+            env, task_description = _get_libero_env(
+                task, LIBERO_ENV_RESOLUTION, args.seed, args.control_freq, args.render_gpu_device_id
+            )
 
             try:
                 # Start episodes
@@ -390,7 +393,7 @@ def eval_libero(args: Args) -> None:
         client_model.close()
 
 
-def _get_libero_env(task, resolution, seed, control_freq=20):
+def _get_libero_env(task, resolution, seed, control_freq=20, render_gpu_device_id=-1):
     """Initializes and returns the LIBERO environment, along with the task description."""
     from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
@@ -402,6 +405,7 @@ def _get_libero_env(task, resolution, seed, control_freq=20):
         "camera_heights": resolution,
         "camera_widths": resolution,
         "control_freq": control_freq,
+        "render_gpu_device_id": render_gpu_device_id,
     }
     env = OffScreenRenderEnv(**env_args)
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
