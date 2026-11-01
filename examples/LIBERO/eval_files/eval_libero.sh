@@ -13,10 +13,10 @@ NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-2}"
 REALTIME="${REALTIME:-true}"
 # Simulation control frequency and replay FPS.
 CONTROL_FREQ="${CONTROL_FREQ:-20}"
-# RTC is opt-in; H is read from the connected policy server's metadata.
+# H comes from server metadata; stride and delay adapt to measured control cycles.
 RTC_ENABLED="${RTC_ENABLED:-true}"
-RTC_STRIDE="${RTC_STRIDE:-4}"
-RTC_DELAY="${RTC_DELAY:-2}"
+RTC_STRIDE="${RTC_STRIDE:-auto}"
+RTC_DELAY="${RTC_DELAY:-auto}"
 RTC_BETA="${RTC_BETA:-0.5}"
 RTC_INPAINTING="${RTC_INPAINTING:-true}"
 RTC_GUIDANCE_BETA="${RTC_GUIDANCE_BETA:-5.0}"
@@ -54,6 +54,14 @@ if [[ ! "${CONTROL_FREQ}" =~ ^[1-9][0-9]*$ ]]; then
   echo "CONTROL_FREQ must be a positive integer (Hz)." >&2
   exit 1
 fi
+if [[ "${RTC_STRIDE}" != auto && ! "${RTC_STRIDE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "RTC_STRIDE must be auto or a positive integer (control cycles)." >&2
+  exit 1
+fi
+if [[ "${RTC_DELAY}" != auto && ! "${RTC_DELAY}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  echo "RTC_DELAY must be auto or a non-negative integer (control cycles)." >&2
+  exit 1
+fi
 
 MUJOCO_GL_VALUE="${MUJOCO_GL_VALUE:-egl}"
 PYOPENGL_PLATFORM_VALUE="${PYOPENGL_PLATFORM_VALUE:-egl}"
@@ -74,7 +82,7 @@ FOLDER_NAME="$(echo "${CKPT}" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')"
 MODEL_ROOT="$(echo "${CKPT}" | awk -F'/checkpoints/' '{print $1}')"
 VIDEO_OUT_PATH="${MODEL_ROOT}/results/${TASK_SUITE_NAME}/${FOLDER_NAME}"
 
-echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, rtc=${RTC_ENABLED}, inpainting=${RTC_INPAINTING}"
+echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, rtc=${RTC_ENABLED}, stride=${RTC_STRIDE}, delay=${RTC_DELAY}, inpainting=${RTC_INPAINTING}"
 "${LIBERO_PYTHON}" ./examples/LIBERO/eval_files/eval_libero.py \
   --args.pretrained-path "${CKPT}" \
   --args.host "${HOST}" \

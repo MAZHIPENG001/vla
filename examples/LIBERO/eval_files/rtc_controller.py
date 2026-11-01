@@ -11,14 +11,15 @@ from dataclasses import dataclass, field
 import logging
 import math
 import time
+from typing import Literal
 
 import numpy as np
 
 
 @dataclass(frozen=True)
 class RTCConfig:
-    stride: int = 4
-    delay: int = 2
+    stride: int | Literal["auto"] = "auto"
+    delay: int | Literal["auto"] = "auto"
     beta: float = 0.5
     inpainting: bool = True
     guidance_beta: float = 5.0
@@ -27,10 +28,10 @@ class RTCConfig:
     def validate(self, horizon):
         if not isinstance(horizon, int) or horizon < 2:
             raise ValueError("RTC requires action_chunk_size >= 2 from server metadata")
-        if not isinstance(self.stride, int) or not 0 < self.stride < horizon:
-            raise ValueError("RTC requires 0 < rtc_stride < action_chunk_size")
-        if not isinstance(self.delay, int) or not 0 <= self.delay < horizon:
-            raise ValueError("RTC requires 0 <= rtc_delay < action_chunk_size")
+        if self.stride != "auto" and (type(self.stride) is not int or not 0 < self.stride < horizon):
+            raise ValueError("RTC requires rtc_stride='auto' or 0 < rtc_stride < action_chunk_size")
+        if self.delay != "auto" and (type(self.delay) is not int or not 0 <= self.delay < horizon):
+            raise ValueError("RTC requires rtc_delay='auto' or 0 <= rtc_delay < action_chunk_size")
         if not math.isfinite(self.beta) or not 0 <= self.beta <= 1:
             raise ValueError("rtc_beta must be finite and in [0, 1]")
         if not math.isfinite(self.guidance_beta) or self.guidance_beta <= 0:
@@ -44,6 +45,8 @@ class RTCStats:
     requests: int = 0
     inference_ms: list = field(default_factory=list)
     delay_steps: list = field(default_factory=list)
+    estimated_delay_steps: list = field(default_factory=list)
+    request_strides: list = field(default_factory=list)
     wait_steps: int = 0
     blend_actions: int = 0
     buffer_exhaustions: int = 0
@@ -103,8 +106,31 @@ class RTCController:
         self.last_step = -1
         self.had_chunk = False
         self.exhausted = False
-        self.delays = deque([self.config.delay], maxlen=10)
+        # Auto has no fabricated startup latency. The first unconditioned
+        # request measures it while the controller holds safely. Numeric delay
+        # retains the original initial-seed behavior and then ages out.
+        self.delays = deque([] if self.config.delay == "auto" else [self.config.delay], maxlen=10)
         self.stats = RTCStats()
+
+    @property
+    def estimated_delay(self):
+        """Forecast from observed *control cycles*, including client overhead."""
+        return max(self.delays, default=0)
+
+    @property
+    def effective_stride(self):
+        """Choose a reactive request interval; preserve explicit numeric stride.
+
+        With one request in flight, the effective interval is at least the
+        actual inference delay. Prefer s=max(1,d_hat) when s+d_hat<=H. If that
+        budget is infeasible, request at the earliest next cycle and retain
+        the existing hold fallback; changing stride cannot repair too much
+        inference latency. Never clamp the measured delay or action indices.
+        """
+        if self.config.stride != "auto":
+            return self.config.stride
+        candidate = max(1, self.estimated_delay)
+        return candidate if candidate + self.estimated_delay <= self.horizon else 1
 
     def _infer(self, example, rtc):
         started = self.clock()
@@ -122,6 +148,14 @@ class RTCController:
         return chunk, inference_ms
 
     def _submit(self, example, step):
+        estimated_delay, stride = self.estimated_delay, self.effective_stride
+        if max(stride, estimated_delay) + estimated_delay > self.horizon:
+            logging.warning(
+                "RTC latency exceeds continuous-supply budget: H=%d estimated_delay_steps=%d "
+                "request_stride=%d; requesting as soon as scheduling permits, "
+                "pose holds may still be required",
+                self.horizon, estimated_delay, stride,
+            )
         prefix = None
         if self.chunk is not None:
             offset = step - self.origin
@@ -129,7 +163,6 @@ class RTCController:
                 prefix = self.chunk[offset:].copy()
         rtc = None
         if self.config.inpainting and prefix is not None and len(prefix):
-            estimated_delay = max(self.delays)
             if estimated_delay > len(prefix):
                 logging.warning(
                     "RTC delay estimate=%d exceeds remaining prefix=%d; "
@@ -148,7 +181,14 @@ class RTCController:
         future = self.executor.submit(self._infer, example=example, rtc=rtc)
         self.pending = _Request(future, step, submitted, not self.had_chunk, self.generation)
         self.stats.requests += 1
-        logging.debug("RTC request=%d generation=%d request_step=%d", self.stats.requests, self.generation, step)
+        self.stats.estimated_delay_steps.append(estimated_delay)
+        self.stats.request_strides.append(stride)
+        logging.info(
+            "RTC request=%d generation=%d request_step=%d H=%d delay_mode=%s stride_mode=%s "
+            "estimated_delay_steps=%d request_stride=%d",
+            self.stats.requests, self.generation, step, self.horizon,
+            self.config.delay, self.config.stride, estimated_delay, stride,
+        )
 
     def _poll(self, step):
         request = self.pending
@@ -208,7 +248,7 @@ class RTCController:
             raise ValueError("RTC control_step must advance by exactly one on every env control cycle")
         self.last_step = control_step
         self._poll(control_step)
-        if self.pending is None and (self.chunk is None or control_step - self.origin >= self.config.stride):
+        if self.pending is None and (self.chunk is None or control_step - self.origin >= self.effective_stride):
             self._submit(example, control_step)
             self._poll(control_step)  # Immediate results need no artificial wait frame.
         if self.chunk is not None:

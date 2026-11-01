@@ -7,6 +7,7 @@ import pathlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from typing import Literal
 
 import imageio
 import numpy as np
@@ -43,8 +44,8 @@ class Args:
     realtime: bool = True  # Advance simulation while inference runs in a worker thread.
     control_freq: int = 20  # Simulation control frequency and replay FPS, in Hz.
     rtc_enabled: bool = False  # Preserve the existing rollout when disabled.
-    rtc_stride: int = 4  # Minimum controller cycles between requests (s).
-    rtc_delay: int = 2  # Initial inference-delay estimate, in control cycles (d).
+    rtc_stride: int | Literal["auto"] = "auto"  # Infer request interval from measured delay; int overrides s.
+    rtc_delay: int | Literal["auto"] = "auto"  # Measure d from control steps; int seeds initial estimate.
     rtc_beta: float = 0.5  # Maximum old-chunk weight in output overlap blending.
     rtc_inpainting: bool = True  # Requires server/model prefix guidance support.
     rtc_guidance_beta: float = 5.0  # Paper Eq. 2 guidance clipping beta.

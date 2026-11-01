@@ -1,6 +1,6 @@
 # LIBERO RTC 异步控制
 
-实现依据为仓库内的 [RTC 论文](RTC.pdf)第 3 节、式 (2)–(5) 及 Algorithm 1。RTC 默认关闭，不修改训练、权重、训练数据、图像预处理、state 输入、夹爪编码或 LIBERO 环境配置。
+实现依据为仓库内的 [RTC 论文](RTC.pdf)第 3 节、式 (2)–(5) 及 Algorithm 1。Python 参数默认关闭 RTC；现有 `eval_libero.sh` 默认启用 RTC。开启后 stride 和 delay 默认根据推理的实际控制周期延迟自动推导，无需手动指定。不修改训练、权重、训练数据、图像预处理、state 输入、夹爪编码或 LIBERO 环境配置。
 
 ## 原有等待帧的原因
 
@@ -27,17 +27,17 @@ LIBERO_HOME=/path/to/LIBERO \
 LIBERO_PYTHON=/path/to/python \
 CKPT=/path/to/checkpoints/steps_100000_pytorch_model.pt \
 HOST=127.0.0.1 PORT=6694 \
-RTC_ENABLED=true RTC_STRIDE=4 RTC_DELAY=2 RTC_BETA=0.5 \
+RTC_ENABLED=true RTC_BETA=0.5 \
 RTC_INPAINTING=true RTC_GUIDANCE_BETA=5.0 RTC_TIMEOUT=10 \
 bash examples/LIBERO/eval_files/eval_libero.sh
 ```
 
 | 含义 | Python 参数 | 脚本环境变量 | 默认值 |
 | --- | --- | --- | --- |
-| 开关 | `rtc_enabled` | `RTC_ENABLED` | `False` |
+| 开关 | `rtc_enabled` | `RTC_ENABLED` | Python `False`；脚本 `true` |
 | H，预测 chunk 长度 | 服务端 metadata `action_chunk_size` | 无客户端覆盖 | 从权重配置获取 |
-| s，最小请求间隔，单位控制周期 | `rtc_stride` | `RTC_STRIDE` | `4` |
-| d，初始延迟估计，单位控制周期 | `rtc_delay` | `RTC_DELAY` | `2` |
+| s，最小请求间隔，单位控制周期 | `rtc_stride` | `RTC_STRIDE` | `auto`，或手动正整数 |
+| d，延迟估计，单位控制周期 | `rtc_delay` | `RTC_DELAY` | `auto`，或手动初始非负整数 |
 | β，输出融合时旧动作的初始权重 | `rtc_beta` | `RTC_BETA` | `0.5` |
 | 采样阶段前缀约束 | `rtc_inpainting` | `RTC_INPAINTING` | `True` |
 | 论文式 (2) 的 guidance 上限 β | `rtc_guidance_beta` | `RTC_GUIDANCE_BETA` | `5.0` |
@@ -45,7 +45,39 @@ bash examples/LIBERO/eval_files/eval_libero.sh
 
 `rtc_beta` 与论文的 guidance clipping β 是两个不同的参数。前者控制额外的输出融合；后者控制采样时的前缀引导强度。仅评估论文式采样约束时可以设 `RTC_BETA=0`。
 
-RTC 需要 `REALTIME=true`、`0 < s < H`、`0 ≤ d < H`、`0 ≤ rtc_beta ≤ 1`，guidance 上限和 timeout 必须为有限正数。常规连续控制还需要延迟小于旧 chunk 的剩余时间；论文有效工作区域为 `d ≤ s ≤ H-d`。不满足连续供给条件时不能保证无等待帧，程序执行下文的安全保持策略。
+RTC 需要 `REALTIME=true`、`0 ≤ rtc_beta ≤ 1`，guidance 上限和 timeout 必须为有限正数。手动指定的 s 必须满足 `0 < s < H`，手动初始 d 必须满足 `0 ≤ d < H`；自动估计如实保留实际延迟，即使测得 d 已超过 H，也不会把它伪装成较小延迟。
+
+### 自动推导 stride 和 delay
+
+`RTC_STRIDE`、`RTC_DELAY` 默认为 `auto`，也可以显式设置：
+
+```bash
+RTC_STRIDE=auto RTC_DELAY=auto bash examples/LIBERO/eval_files/eval_libero.sh
+```
+
+自动模式的冷启动先提交一个没有动作前缀的普通请求，等待期间安全保持。第一批结果在主线程被发现可用时，测量 `d_k = return_control_step - request_control_step`。此后始终保存最近 10 次观测到的控制周期延迟，用其最大值作为下一次的 `d_hat`，同时用于前缀 inpainting 的 mask 与自动请求间隔。冷启动前不需要猜测推理耗时；实际延迟覆盖客户端预处理、网络、服务端推理和主线程发现结果的时间，不使用服务端毫秒数替代真实控制步。
+
+自动 stride 采用优先快速响应的策略：
+
+```text
+candidate = max(1, d_hat)
+s = candidate  , candidate + d_hat ≤ H
+s = 1          , candidate + d_hat > H
+```
+
+常规情况下该选择满足论文工作区域 `d_hat ≤ s ≤ H-d_hat`（零周期延迟时最少隔一个控制周期）。例如 H=16、最近实测最大延迟为 3 时，自动使用 s=3。延迟升高会立即调整，延迟下降则在较慢样本移出 10 项窗口后调整。
+
+如果 `candidate + d_hat > H`，单个在途请求的串行推理无法保证连续供应动作。控制器会警告、将请求门槛降为 1，尽早利用最新观测补充动作；不会重复提交在途请求，也不宣称能够消除由此产生的等待帧。缓存耗尽时仍执行安全保持。每次真正提交前还会检查剩余前缀容量，动作索引始终以实际控制步对齐。
+
+保留手动与混合模式：
+
+```bash
+RTC_STRIDE=4 RTC_DELAY=2 bash examples/LIBERO/eval_files/eval_libero.sh
+RTC_STRIDE=4 RTC_DELAY=auto bash examples/LIBERO/eval_files/eval_libero.sh
+RTC_STRIDE=auto RTC_DELAY=2 bash examples/LIBERO/eval_files/eval_libero.sh
+```
+
+手动 stride 保持指定的最小请求间隔。手动 delay 沿用原行为：只作为 10 项历史窗口的初始种子，后续继续根据实测延迟更新，不固定实际动作对齐偏移。Episode reset 会清空历史；自动 delay 重新等待首批测量，手动 delay 重新加载该种子。
 
 对 OFT 或未声明前缀采样能力的模型，使用：
 
@@ -73,9 +105,9 @@ RTC 路径为 `eval_libero._run_rtc_episode()` → `rtc_controller.RTCController
 
 首个 chunk 尚未返回时安全保持。因为此时没有旧动作前缀，首个 chunk 在返回时建立执行起点，然后从动作 0 开始；这是静止启动的初始化步骤。所有后续请求严格以提交控制步为 chunk 起点。
 
-例：`H=16, s=4`，首个 chunk 起点为 `t=3`。在 `t=7` 发起下次请求，旧 chunk 索引为 4。若请求在 `t=9` 返回，期间 `t=7,8` 继续执行旧动作索引 4、5；切换时新动作从索引 `9-7=2` 开始，并与旧动作索引 6 对齐。新动作索引 0、1 已经过期，永不补执行。下一次请求最早发生在上一请求起点经过 s 步之后，并且始终最多只有一个请求在途。
+例：服务端 `H=16`、手动指定 `s=4`，首个 chunk 起点为 `t=3`。在 `t=7` 发起下次请求，旧 chunk 索引为 4。若请求在 `t=9` 返回，期间 `t=7,8` 继续执行旧动作索引 4、5；切换时新动作从索引 `9-7=2` 开始，并与旧动作索引 6 对齐。新动作索引 0、1 已经过期，永不补执行。下一次请求最早发生在上一请求起点经过当前 s 步之后，并且始终最多只有一个请求在途；自动模式会随延迟窗口更新 s。
 
-返回时若 `t-r ≥ H`，整个 chunk 都已过期，必须丢弃并用最新观测重试。延迟历史窗口用初始 d 初始化，每次返回加入实际控制周期延迟，最多保留 10 项；下一次请求采用窗口最大值。若估计超过剩余前缀容量，则对 mask 长度截断并警告。延迟估计仅用于指导尚未返回时预计执行的动作前缀，不参与动作对齐。若一次请求延迟已达到 s，收到结果后可立即发起下一次请求，此时实际请求间隔会大于等于配置的最小 s。
+返回时若 `t-r ≥ H`，整个 chunk 都已过期，必须丢弃并用最新观测重试。若延迟估计超过剩余前缀容量，则对 mask 长度截断并警告。延迟估计用于前缀约束与请求调度，不参与动作对齐。若一次请求延迟已达到当前 s，收到结果后可立即发起下一次请求，此时实际请求间隔受真实推理耗时限制，可能大于 s。
 
 ## 输出重叠融合
 
@@ -149,6 +181,8 @@ episode 的 Future、chunk、时间索引均单独创建，结束或提前成功
 
 日志包含请求耗时 `inference_ms`（毫秒）、实际控制周期延迟 `delay_steps`、等待帧 `wait_steps`、已消费的融合动作数 `blend_actions`、缓存耗尽次数 `buffer_exhaustions`、过期 chunk 数 `stale_chunks` 和请求数 `requests`，并保留原有 LIBERO 任务和总体成功率。控制循环落后实时周期时会警告，因为这时相同墙钟延迟对应的控制周期数会减少。
 
+每次请求还记录生效的延迟估计 `estimated_delay_steps` 和请求门槛 `request_strides`，并记录配置模式、当前估计、stride 和 H。`request_strides` 是计划门槛，不代表在途推理一定能在该间隔内完成；实际延迟仍以 `delay_steps` 为准。
+
 `inference_ms` 为客户端完整模型请求耗时；服务端同时记录 `server_inference_ms`，不含客户端预处理和网络往返。episode 结束后 drain 完成的请求单独记录耗时和终止前实际控制周期数，不将清理墙钟时间换算为仿真控制步，也不加入用于后续切换的 `delay_steps`。
 
 ## 验证范围
@@ -161,6 +195,6 @@ python -m unittest discover -s tests -p 'test_libero_realtime.py'
 bash -n examples/LIBERO/eval_files/eval_libero.sh
 ```
 
-本次实现验证：43 项测试通过，包括 15 项调度/episode 测试、11 项前缀采样测试、8 项协议/归一化测试和原有 9 项实时控制测试。Shell 语法检查、Python 编译检查、`git diff --check` 和真实 tyro CLI 参数解析通过。验证环境缺少的 `msgpack`/`tyro` 仅临时安装到 `/tmp/vla-rtc-deps`，未修改项目环境；评测依赖安装方式沿用 README。
+本次验证 58 项测试全部通过且无跳过（原有 43 项、12 项自动调度、3 项 CLI），Python 编译、Shell 语法和 `git diff --check` 通过。自动模式覆盖冷启动测量、零周期延迟、延迟变化与窗口淘汰、超出 horizon、reset 历史清理、手动/混合模式和真实 tyro 参数解析。Shell 参数检查拒绝无效的 auto/数值输入。验证环境缺少的 `msgpack`/`tyro` 仅临时安装到 `/tmp/vla-rtc-deps`，未修改项目环境；评测依赖安装方式沿用 README。
 
-单元测试不等同于实际 LIBERO 成功率或 GPU 性能测量。前缀 VJP 会增加推理显存和延迟，需要在目标 GPU、实际模型权重和 LIBERO 安装中测量并设置 s、d 和 timeout。若目标 GPU attention 内核不支持所需的反向传播，应选择支持动作 VJP 的 attention 后端，不能以输出拼接代替采样约束。
+单元测试不等同于实际 LIBERO 成功率或 GPU 性能测量。前缀 VJP 会增加推理显存和延迟，自动模式会随这些变化调整；仍需在目标 GPU、实际模型权重和 LIBERO 安装中测量成功率与耗时并选择 timeout。自动 stride 是优先响应速度的调度策略，不能仅凭耗时推导任务成功率最优的执行频率。若目标 GPU attention 内核不支持所需的反向传播，应选择支持动作 VJP 的 attention 后端，不能以输出拼接代替采样约束。
