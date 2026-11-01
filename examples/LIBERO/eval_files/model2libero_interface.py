@@ -15,9 +15,9 @@ ensembling, gripper sticky logic, and chunk-cache scheduling.
 """
 
 from collections import deque
+import logging
 from typing import Optional, Sequence
 
-import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
@@ -44,7 +44,10 @@ class ModelClient:
         self.client = WebsocketClientPolicy(host, port)
         meta = self.client.get_server_metadata()
         self.action_chunk_size = int(meta["action_chunk_size"])
+        if self.action_chunk_size <= 0:
+            raise ValueError("Server action_chunk_size must be positive")
         self._server_metadata = meta
+        self.supports_rtc_inpainting = bool(meta.get("rtc_inpainting", False))
 
         self.image_size: tuple = tuple(image_size)
         self.policy_setup = policy_setup
@@ -105,6 +108,60 @@ class ModelClient:
     def close(self) -> None:
         self.client.close()
 
+    def set_inference_timeout(self, seconds: float) -> None:
+        self.client.set_inference_timeout(seconds)
+
+    def _prepare_example(self, example: dict) -> dict:
+        """Reuse legacy image resizing without changing episode or cache state."""
+        if self.image_size and example.get("image"):
+            resized = []
+            target_hw = self.image_size
+            for img in example["image"]:
+                arr = np.asarray(img)
+                if arr.shape[:2] != target_hw:
+                    arr = np.asarray(
+                        Image.fromarray(arr).resize(
+                            (target_hw[1], target_hw[0]), Image.BILINEAR
+                        )
+                    )
+                resized.append(arr)
+            example = {**example, "image": resized}
+        return example
+
+    def predict_chunk(self, example: dict, rtc: Optional[dict] = None) -> np.ndarray:
+        """Request one full chunk, leaving all episode/cache state to the caller.
+
+        Safe to run in the inference worker: this method never resets the
+        client or installs actions, even if an episode ends during the request.
+        RTC prefixes remain in unnormalized policy coordinates on the wire.
+        """
+        if rtc is not None and not self.supports_rtc_inpainting:
+            raise ValueError("Server does not support RTC action prefix inpainting")
+        vla_input = {
+            "examples": [self._prepare_example(example)],
+            "unnorm_key": self.unnorm_key,
+            "do_sample": False,
+            "use_ddim": self.use_ddim,
+            "num_ddim_steps": self.num_ddim_steps,
+        }
+        if rtc is not None:
+            vla_input["rtc"] = rtc
+        response = self.client.predict_action(vla_input)
+        if response.get("ok") is False or response.get("status") == "error":
+            raise RuntimeError(f"Policy inference failed: {response.get('error')}")
+        try:
+            actions = np.asarray(response["data"]["actions"], dtype=np.float32)
+        except KeyError as exc:
+            raise KeyError(
+                f"Key 'actions' not found in response data: keys={list(response.get('data', {}))}"
+            ) from exc
+        expected = (1, self.action_chunk_size, 7)
+        if actions.shape != expected or not np.isfinite(actions).all():
+            raise ValueError(f"Expected finite LIBERO action chunk {expected}, got {actions.shape}")
+        if "server_inference_ms" in response:
+            logging.info("Policy server model inference: %.3f ms", response["server_inference_ms"])
+        return actions[0].copy()
+
     def step(self, example: dict, step: int = 0, **kwargs) -> dict:
         """One env step.
 
@@ -120,39 +177,9 @@ class ModelClient:
         if task_description != self.task_description:
             self.reset(task_description)
 
-        # Resize images to self.image_size if needed.
-        if self.image_size and example.get("image"):
-            resized = []
-            target_hw = self.image_size  # (H, W)
-            for img in example["image"]:
-                arr = np.asarray(img)
-                if arr.shape[:2] != target_hw:
-                    arr = np.asarray(
-                        Image.fromarray(arr).resize(
-                            (target_hw[1], target_hw[0]), Image.BILINEAR
-                        )
-                    )
-                resized.append(arr)
-            example = {**example, "image": resized}
-
         # Refresh chunk if needed.
         if self.needs_inference(step):
-            vla_input = {
-                "examples": [example],
-                "unnorm_key": self.unnorm_key,
-                "do_sample": False,
-                "use_ddim": self.use_ddim,
-                "num_ddim_steps": self.num_ddim_steps,
-            }
-            response = self.client.predict_action(vla_input)
-            try:
-                actions_batch = response["data"]["actions"]  # (B, T, D), unnormalized server-side
-            except KeyError:
-                raise KeyError(
-                    f"Key 'actions' not found in response data: keys={list(response.get('data', {}).keys())}, "
-                    f"full response={response}"
-                )
-            self.raw_actions = np.asarray(actions_batch)[0]  # (T, D)
+            self.raw_actions = self.predict_chunk(example)
 
         raw_actions = self.raw_actions[step % self.action_chunk_size][None]
         raw_action = {
@@ -165,6 +192,8 @@ class ModelClient:
     def visualize_epoch(
         self, predicted_raw_actions: Sequence[np.ndarray], images: Sequence[np.ndarray], save_path: str
     ) -> None:
+        import matplotlib.pyplot as plt
+
         ACTION_DIM_LABELS = ["x", "y", "z", "roll", "pitch", "yaw", "grasp"]
         img_strip = np.concatenate(np.array(images[::3]), axis=1)
         figure_layout = [["image"] * len(ACTION_DIM_LABELS), ACTION_DIM_LABELS]

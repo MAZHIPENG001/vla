@@ -91,6 +91,8 @@ class QwenPIDefaultConfig:
 
 @FRAMEWORK_REGISTRY.register("QwenPI")
 class Qwen_PI(baseframework):
+    supports_rtc_inpainting = True
+
     def __init__(self,config: Optional[dict] = None,**kwargs,) -> None:
         super().__init__()
         # Merge framework defaults with YAML config (YAML wins on conflicts)
@@ -206,10 +208,10 @@ class Qwen_PI(baseframework):
     def predict_action(  # TODO align  predict_action with forward, make api more flexible
             self,
             examples: List[dict] = None,
-            **kwargs: str,
+            **kwargs,
     ) -> np.ndarray:
         """
-        Inference: single forward pass to directly regress future actions (no diffusion sampling).
+        Sample normalized actions with optional training-free RTC flow guidance.
 
         Steps:
           1. Resize images to training resolution (if specified)
@@ -246,7 +248,8 @@ class Qwen_PI(baseframework):
         # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float16):
             pred_actions = self.action_model.predict_action(
-                vl_embs_list, state, encoder_attention_mask=backbone_attention_mask
+                vl_embs_list, state, encoder_attention_mask=backbone_attention_mask,
+                rtc=kwargs.get("rtc"),
             )  # (B, chunk_len, action_dim)
 
         normalized_actions = pred_actions.detach().cpu().numpy()

@@ -136,6 +136,8 @@ LIBERO 状态为当前帧的 8 维 EEF 位置、axis-angle 旋转向量和双指
 只有明确按无 state 训练的模型才使用 `INCLUDE_STATE=false` 启动服务端。
 修改配置或更新服务端代码后需要重启，完整核对记录见 [评测排查记录](docs/libero_eval_audit.md)。
 ### Step 3: Run evaluation (Terminal 2 — LIBERO env)
+RTC 异步连续控制、PI 前缀 Inpainting 和 `RTC_*` 启动参数见 [LIBERO RTC 使用说明](docs/RTC.md)。
+
 Edit the paths in examples/LIBERO/eval_files/eval_libero.sh, then:
 ```bash
 CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt

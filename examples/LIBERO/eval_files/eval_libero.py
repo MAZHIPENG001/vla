@@ -42,6 +42,13 @@ class Args:
     max_tasks: int = -1  # If > 0, limit the number of tasks evaluated (smoke / quick check). -1 = run all.
     realtime: bool = True  # Advance simulation while inference runs in a worker thread.
     control_freq: int = 20  # Simulation control frequency and replay FPS, in Hz.
+    rtc_enabled: bool = False  # Preserve the existing rollout when disabled.
+    rtc_stride: int = 4  # Minimum controller cycles between requests (s).
+    rtc_delay: int = 2  # Initial inference-delay estimate, in control cycles (d).
+    rtc_beta: float = 0.5  # Maximum old-chunk weight in output overlap blending.
+    rtc_inpainting: bool = True  # Requires server/model prefix guidance support.
+    rtc_guidance_beta: float = 5.0  # Paper Eq. 2 guidance clipping beta.
+    rtc_timeout: float = 10.0  # Bound each inference request, in wall seconds.
 
     #################################################################################################################
     # Utils
@@ -124,6 +131,8 @@ def _run_episode(env, client_model, obs, task_description, args, max_steps):
     does not skip cached actions. Only one request may be in flight, and it is
     drained before returning so it cannot mutate the next episode's cache.
     """
+    if args.rtc_enabled:
+        return _run_rtc_episode(env, client_model, obs, task_description, args, max_steps)
     _video_status_badges()  # Validate and load the font before starting the control clock.
     for _ in range(args.num_steps_wait):
         obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
@@ -209,6 +218,67 @@ def _run_episode(env, client_model, obs, task_description, args, max_steps):
     return replay_images, done
 
 
+def _run_rtc_episode(env, client_model, obs, task_description, args, max_steps):
+    """Execute RTC at the simulation control clock; all env access stays here."""
+    from examples.LIBERO.eval_files.rtc_controller import RTCConfig, RTCController
+
+    if not args.realtime:
+        raise ValueError("RTC requires realtime=True so inference delay is measured in control cycles")
+    config = RTCConfig(
+        stride=args.rtc_stride, delay=args.rtc_delay, beta=args.rtc_beta,
+        inpainting=args.rtc_inpainting, guidance_beta=args.rtc_guidance_beta,
+        timeout=args.rtc_timeout,
+    )
+    config.validate(client_model.action_chunk_size)
+    client_model.set_inference_timeout(config.timeout)
+    controller = RTCController(client_model, config)
+    replay_images, replay_waiting = [], []
+    done = False
+    hold_action = LIBERO_DUMMY_ACTION.copy()
+    period = 1.0 / args.control_freq
+    _video_status_badges()
+    try:
+        for _ in range(args.num_steps_wait):
+            obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
+        started = next_tick = time.monotonic()
+        for control_step in range(max_steps):
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            raw = controller.next_action(_make_model_example(obs, task_description), control_step)
+            waiting = raw is None
+            if waiting:
+                action = hold_action.copy()
+            else:
+                action = _decode_action({"raw_action": {
+                    "world_vector": raw[:3], "rotation_delta": raw[3:6], "open_gripper": raw[6:7],
+                }})
+                hold_action[-1] = action[-1]
+            obs, _, done, _ = env.step(action)
+            replay_images.append(np.ascontiguousarray(obs["agentview_image"][::-1, ::-1]))
+            replay_waiting.append(waiting)
+            next_tick += period
+            if done:
+                break
+        delay = next_tick - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        elapsed = time.monotonic() - started
+        sim_seconds = len(replay_images) * period
+        logging.info("RTC rollout timing: sim=%.3fs wall=%.3fs", sim_seconds, elapsed)
+        if sim_seconds and elapsed > sim_seconds * 1.1:
+            logging.warning("RTC simulation slower than real time: %.2fx wall/sim", elapsed / sim_seconds)
+    finally:
+        try:
+            controller.close()  # Bounded drain, including early success and exceptions.
+        finally:
+            logging.info("RTC episode statistics: %s", json.dumps(dataclasses.asdict(controller.stats)))
+    return [
+        _annotate_video_frame(frame, waiting)
+        for frame, waiting in zip(replay_images, replay_waiting)
+    ], done
+
+
 def eval_libero(args: Args) -> None:
     from libero.libero import benchmark
     from examples.LIBERO.eval_files.model2libero_interface import ModelClient
@@ -217,6 +287,8 @@ def eval_libero(args: Args) -> None:
         raise ValueError("control_freq must be positive")
     if args.num_steps_wait < 0:
         raise ValueError("num_steps_wait must be non-negative")
+    if args.rtc_enabled and not args.realtime:
+        raise ValueError("RTC requires realtime=True")
     logging.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
 
     # Set random seed

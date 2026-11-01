@@ -353,6 +353,35 @@ class PolicyNormProcessor:
         return self._transform
 
     # ------------------------------------------------------------------
+    # Forward path (committed env actions → model-space RTC prefix)
+    # ------------------------------------------------------------------
+    def apply_actions(self, actions: np.ndarray) -> np.ndarray:
+        """Normalize an RTC prefix with the checkpoint's training transform.
+
+        This deliberately keeps gripper normalization and constant-channel
+        handling in the registered transform, exactly as in training.
+        """
+        actions = np.asarray(actions, dtype=np.float32)
+        expected_dim = sum(self._action_key_dims[k] for k in self._action_keys)
+        if actions.ndim != 2 or actions.shape[-1] != expected_dim:
+            raise ValueError(f"Expected (T, {expected_dim}) actions; got {actions.shape}")
+        if not np.isfinite(actions).all():
+            raise ValueError("RTC action prefix contains non-finite values")
+        data = {}
+        cursor = 0
+        for full_key in self._action_keys:
+            dim_k = self._action_key_dims[full_key]
+            # Own the arrays: some training transforms operate in place.
+            data[full_key] = actions[:, cursor:cursor + dim_k].copy()
+            cursor += dim_k
+        out = self._transform.apply(data)
+        parts = [out["action"]] if "action" in out else [out[k] for k in self._action_keys]
+        return np.concatenate([
+            p.detach().cpu().numpy() if isinstance(p, torch.Tensor) else np.asarray(p)
+            for p in parts
+        ], axis=-1)
+
+    # ------------------------------------------------------------------
     # Inverse path (model output → env action)
     # ------------------------------------------------------------------
     def unapply_actions(self, normalized_actions: np.ndarray) -> np.ndarray:

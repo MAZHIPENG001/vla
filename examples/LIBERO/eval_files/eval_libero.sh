@@ -13,6 +13,14 @@ NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-2}"
 REALTIME="${REALTIME:-true}"
 # Simulation control frequency and replay FPS.
 CONTROL_FREQ="${CONTROL_FREQ:-20}"
+# RTC is opt-in; H is read from the connected policy server's metadata.
+RTC_ENABLED="${RTC_ENABLED:-false}"
+RTC_STRIDE="${RTC_STRIDE:-4}"
+RTC_DELAY="${RTC_DELAY:-2}"
+RTC_BETA="${RTC_BETA:-0.5}"
+RTC_INPAINTING="${RTC_INPAINTING:-true}"
+RTC_GUIDANCE_BETA="${RTC_GUIDANCE_BETA:-5.0}"
+RTC_TIMEOUT="${RTC_TIMEOUT:-10.0}"
 
 case "${REALTIME}" in
   true|1) REALTIME_ARGS=(--args.realtime) ;;
@@ -22,6 +30,26 @@ case "${REALTIME}" in
     exit 1
     ;;
 esac
+case "${RTC_ENABLED}" in
+  true|1) RTC_ARGS=(--args.rtc-enabled) ;;
+  false|0) RTC_ARGS=(--args.no-rtc-enabled) ;;
+  *)
+    echo "RTC_ENABLED must be true, false, 1, or 0." >&2
+    exit 1
+    ;;
+esac
+case "${RTC_INPAINTING}" in
+  true|1) RTC_ARGS+=(--args.rtc-inpainting) ;;
+  false|0) RTC_ARGS+=(--args.no-rtc-inpainting) ;;
+  *)
+    echo "RTC_INPAINTING must be true, false, 1, or 0." >&2
+    exit 1
+    ;;
+esac
+if [[ "${RTC_ENABLED}" =~ ^(true|1)$ && "${REALTIME}" =~ ^(false|0)$ ]]; then
+  echo "RTC_ENABLED requires REALTIME=true so inference can run alongside control." >&2
+  exit 1
+fi
 if [[ ! "${CONTROL_FREQ}" =~ ^[1-9][0-9]*$ ]]; then
   echo "CONTROL_FREQ must be a positive integer (Hz)." >&2
   exit 1
@@ -46,7 +74,7 @@ FOLDER_NAME="$(echo "${CKPT}" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')"
 MODEL_ROOT="$(echo "${CKPT}" | awk -F'/checkpoints/' '{print $1}')"
 VIDEO_OUT_PATH="${MODEL_ROOT}/results/${TASK_SUITE_NAME}/${FOLDER_NAME}"
 
-echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz"
+echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz, rtc=${RTC_ENABLED}, inpainting=${RTC_INPAINTING}"
 "${LIBERO_PYTHON}" ./examples/LIBERO/eval_files/eval_libero.py \
   --args.pretrained-path "${CKPT}" \
   --args.host "${HOST}" \
@@ -55,4 +83,10 @@ echo "LIBERO evaluation: realtime=${REALTIME}, control_freq=${CONTROL_FREQ} Hz"
   --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
   --args.video-out-path "${VIDEO_OUT_PATH}" \
   --args.control-freq "${CONTROL_FREQ}" \
+  --args.rtc-stride "${RTC_STRIDE}" \
+  --args.rtc-delay "${RTC_DELAY}" \
+  --args.rtc-beta "${RTC_BETA}" \
+  --args.rtc-guidance-beta "${RTC_GUIDANCE_BETA}" \
+  --args.rtc-timeout "${RTC_TIMEOUT}" \
+  "${RTC_ARGS[@]}" \
   "${REALTIME_ARGS[@]}"

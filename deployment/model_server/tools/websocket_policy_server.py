@@ -114,7 +114,9 @@ class WebsocketPolicyServer:
                     "error": {"message": "Payload must be a dict", "payload_type": str(type(payload))},
                 }
             try:
+                inference_started = time.monotonic()
                 output_dict = self._policy.predict_action(**payload)
+                inference_ms = (time.monotonic() - inference_started) * 1000.0
             except Exception as e:
                 logging.exception("Policy inference error (request_id=%s)", req_id)
                 logging.exception(e)
@@ -135,6 +137,7 @@ class WebsocketPolicyServer:
                 "type": "inference_result",
                 "request_id": req_id,
                 "data": data,
+                "server_inference_ms": inference_ms,
             }
 
         # unknow request type

@@ -3,6 +3,7 @@
 # Implemented by [Jinhui YE / HKUST University] in [2025].
 
 import logging
+import math
 import os
 import time
 from typing import Dict, Optional, Tuple
@@ -26,6 +27,9 @@ class WebsocketClientPolicy:
             self._uri += f":{port}"
         self._packer = msgpack_numpy.Packer()
         self._api_key = api_key
+        self._inference_timeout = None  # Legacy callers keep their existing behavior.
+        self._request_sequence = 0
+        self._failed = False
         self._ws, self._server_metadata = self._wait_for_server()
 
     def get_server_metadata(self) -> Dict:
@@ -52,6 +56,7 @@ class WebsocketClientPolicy:
                     open_timeout=150,
                     ping_interval=None,
                     ping_timeout=60,
+                    close_timeout=1,
                 )
                 metadata = msgpack_numpy.unpackb(conn.recv())
                 return conn, metadata
@@ -65,11 +70,35 @@ class WebsocketClientPolicy:
         except Exception:
             pass
 
+    def set_inference_timeout(self, seconds: float) -> None:
+        """Bound response waits; a timed-out socket cannot be reused."""
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("Inference timeout must be finite and positive")
+        self._inference_timeout = float(seconds)
+
     @override
     def predict_action(self, query_info: Dict) -> Dict:
-        data = self._packer.pack(query_info)
-        self._ws.send(data)
-        response = self._ws.recv()
+        if self._failed:
+            raise RuntimeError("Policy connection is unusable after an earlier transport failure")
+        self._request_sequence += 1
+        request_id = str(self._request_sequence)
+        data = self._packer.pack({"type": "infer", "request_id": request_id, "payload": query_info})
+        try:
+            self._ws.send(data)
+            response = self._ws.recv(timeout=self._inference_timeout)
+        except Exception:
+            self._failed = True
+            self.close()
+            raise
         if isinstance(response, str):
             raise RuntimeError(f"Error in inference server:\n{response}")
-        return msgpack_numpy.unpackb(response)
+        result = msgpack_numpy.unpackb(response)
+        if result.get("request_id") != request_id:
+            self._failed = True
+            self.close()
+            raise RuntimeError(
+                f"Policy response request_id={result.get('request_id')!r}, expected {request_id!r}"
+            )
+        if result.get("ok") is False or result.get("status") == "error":
+            raise RuntimeError(f"Policy inference failed: {result.get('error')}")
+        return result

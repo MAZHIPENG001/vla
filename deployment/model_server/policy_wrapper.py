@@ -123,6 +123,7 @@ class PolicyServerWrapper:
             "available_unnorm_keys": self._available_unnorm_keys,
             "default_unnorm_key": self._default_unnorm_key,
             "include_state": self._include_state,
+            "rtc_inpainting": bool(getattr(self._framework, "supports_rtc_inpainting", False)),
         }
         # Enrich with per-embodiment keys when a default processor already exists.
         if self._default_unnorm_key is not None:
@@ -135,6 +136,7 @@ class PolicyServerWrapper:
         self,
         examples: List[dict],
         unnorm_key: Optional[str] = None,
+        rtc: Optional[dict] = None,
         **kwargs,
     ) -> Dict[str, np.ndarray]:
         """Run the framework, then un-normalize via training-time transforms.
@@ -159,6 +161,30 @@ class PolicyServerWrapper:
                     f"Pass one of {self._available_unnorm_keys}."
                 )
         proc = self._get_processor(effective_key)
+
+        if rtc is not None:
+            if not getattr(self._framework, "supports_rtc_inpainting", False):
+                raise ValueError(
+                    f"{type(self._framework).__name__} does not support RTC prefix inpainting; "
+                    "disable rtc_inpainting to use asynchronous chunk blending."
+                )
+            prefix = np.asarray(rtc["prefix_actions"], dtype=np.float32)
+            if prefix.ndim != 3 or prefix.shape[0] != len(examples):
+                raise ValueError(f"RTC prefix must have shape (B, K, D), got {prefix.shape}")
+            if not 0 < prefix.shape[1] <= self._action_chunk_size:
+                raise ValueError("RTC prefix length must be in [1, action_chunk_size]")
+            delay = rtc.get("delay", 0)
+            beta = float(rtc.get("beta", 5.0))
+            if isinstance(delay, bool) or not isinstance(delay, (int, np.integer)) or delay < 0:
+                raise ValueError("RTC delay must be a non-negative integer")
+            if not np.isfinite(beta) or beta <= 0:
+                raise ValueError("RTC guidance beta must be finite and positive")
+            normalized_prefix = np.stack([proc.apply_actions(p) for p in prefix], axis=0)
+            kwargs["rtc"] = {
+                "prefix_actions": normalized_prefix,
+                "delay": int(delay),
+                "beta": beta,
+            }
 
         if not self._include_state:
             examples = [{k: v for k, v in example.items() if k != "state"} for example in examples]

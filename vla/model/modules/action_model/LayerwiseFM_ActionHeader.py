@@ -14,6 +14,7 @@ from transformers.feature_extraction_utils import BatchFeature
 
 from vla.model.modules.action_model.flow_matching_head.action_encoder import SinusoidalPositionalEncoding, swish
 from vla.model.modules.action_model.flow_matching_head.cross_attention_dit import DiT
+from vla.model.modules.action_model.rtc_inpainting import rtc_guided_euler_step, rtc_prefix_weights
 
 # TODO try to meger DiT Modules with follow_match_head, they are just the same arch, but diff loss, use diffusers package will be simple
 
@@ -353,7 +354,24 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
         vl_embs_list: list,
         state: torch.Tensor = None,
         encoder_attention_mask=None,
+        rtc: dict = None,
     ) -> torch.Tensor:
+        if rtc is None:
+            return self._sample_actions(vl_embs_list, state, encoder_attention_mask)
+
+        # QwenPI encodes the VLM under inference_mode. Its output tensors must
+        # become ordinary, constant tensors before the action-head VJP can save
+        # them for backward. The VLM itself never participates in that backward.
+        with torch.inference_mode(False), torch.no_grad():
+            vl_embs_list = [hidden.detach().clone() for hidden in vl_embs_list]
+            state = state.detach().clone() if state is not None else None
+            encoder_attention_mask = (
+                encoder_attention_mask.detach().clone()
+                if encoder_attention_mask is not None else None
+            )
+            return self._sample_actions(vl_embs_list, state, encoder_attention_mask, rtc=rtc)
+
+    def _sample_actions(self, vl_embs_list, state, encoder_attention_mask, rtc=None):
         # Set initial actions as the sampled noise.
         batch_size = vl_embs_list[0].shape[0]
         device = vl_embs_list[0].device
@@ -368,6 +386,19 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
 
         state_features = self.state_encoder(state) if state is not None else None
 
+        if rtc is not None:
+            prefix = torch.as_tensor(rtc["prefix_actions"], device=device, dtype=actions.dtype)
+            if (
+                prefix.ndim != 3 or prefix.shape[0] != batch_size
+                or prefix.shape[2] != self.action_dim or prefix.shape[1] > self.action_horizon
+            ):
+                raise ValueError("RTC normalized prefix must have shape [B, K<=H, action_dim]")
+            if not torch.isfinite(prefix).all():
+                raise ValueError("RTC normalized prefix contains non-finite actions")
+            weights = rtc_prefix_weights(self.action_horizon, prefix.shape[1], rtc["delay"], device=device)
+            target = torch.zeros_like(actions)
+            target[:, :prefix.shape[1]] = prefix
+
         # Run denoising steps.
         for t in range(num_steps):
             t_cont = t / float(num_steps)
@@ -376,40 +407,40 @@ class LayerwiseFlowmatchingActionHead(nn.Module):
                 size=(batch_size,), fill_value=t_discretized_int, device=device, dtype=torch.long
             )
 
-            # Embed current action trajectory with timestep
-            action_features = self.action_encoder(actions, timesteps_tensor)
+            def velocity_fn(current_actions):
+                # Embed current action trajectory with timestep.
+                action_features = self.action_encoder(current_actions, timesteps_tensor)
+                if self.config.add_pos_embed:
+                    pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+                    pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+                    action_features = action_features + pos_embs
 
-            # Maybe add position embedding.
-            if self.config.add_pos_embed:
-                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
-                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
-                action_features = action_features + pos_embs
-
-            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(batch_size, -1, -1)
-            sa_embs = (
-                torch.cat((state_features, future_tokens, action_features), dim=1)
-                if state_features is not None
-                else torch.cat((future_tokens, action_features), dim=1)
-            )
-
-            # Encode timestep
-            temb = self.model.timestep_encoder(timesteps_tensor)
-
-            # Layerwise cross-attention with vl_embs_list
-            model_output = sa_embs
-            for layer_idx, layer in enumerate(self.model.transformer_blocks):
-                model_output = layer(
-                    hidden_states=model_output,
-                    encoder_hidden_states=vl_embs_list[layer_idx],
-                    encoder_attention_mask=encoder_attention_mask,
-                    temb=temb,
+                future_tokens = self.future_tokens.weight.unsqueeze(0).expand(batch_size, -1, -1)
+                sa_embs = (
+                    torch.cat((state_features, future_tokens, action_features), dim=1)
+                    if state_features is not None
+                    else torch.cat((future_tokens, action_features), dim=1)
                 )
-            # TODO miss self att and _process_output
-            pred = self.action_decoder(model_output)
-            pred_velocity = pred[:, -self.action_horizon :]
+                temb = self.model.timestep_encoder(timesteps_tensor)
+                model_output = sa_embs
+                for layer_idx, layer in enumerate(self.model.transformer_blocks):
+                    model_output = layer(
+                        hidden_states=model_output,
+                        encoder_hidden_states=vl_embs_list[layer_idx],
+                        encoder_attention_mask=encoder_attention_mask,
+                        temb=temb,
+                    )
+                pred = self.action_decoder(model_output)
+                return pred[:, -self.action_horizon :]
 
-            # Euler integration
-            actions = actions + dt * pred_velocity
+            if rtc is None:
+                # Preserve the original unconditioned Euler update exactly.
+                actions = actions + dt * velocity_fn(actions)
+            else:
+                actions = rtc_guided_euler_step(
+                    actions, velocity_fn, target, weights,
+                    time=t_cont, dt=dt, beta=rtc["beta"],
+                )
         return actions
 
     @property
