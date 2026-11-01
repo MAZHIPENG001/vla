@@ -90,30 +90,16 @@ def _decode_action(response):
 
 @lru_cache(maxsize=1)
 def _video_status_badges():
-    """Render the two Chinese labels once, using a font with CJK support."""
-    custom_font = os.environ.get("LIBERO_VIDEO_FONT_PATH")
-    font_paths = [custom_font] if custom_font else [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-        "NotoSansCJK-Regular.ttc",
-    ]
-    for font_path in font_paths:
-        try:
-            font = ImageFont.truetype(font_path, size=18)
-            break
-        except OSError:
-            continue
-    else:
-        raise RuntimeError(
-            "Cannot load a Chinese video font. Set LIBERO_VIDEO_FONT_PATH to a CJK .ttf/.ttc/.otf file."
-        )
+    """Render English labels once with Pillow's bundled font."""
+    try:
+        font = ImageFont.load_default(size=18)
+    except TypeError:  # Older Pillow versions have a fixed-size bundled font.
+        font = ImageFont.load_default()
 
     badges = {}
     for waiting, text, color in (
-        (True, "等待推理", (255, 0, 0, 255)),
-        (False, "正在执行", (0, 255, 0, 255)),
+        (True, "Waiting for inference", (255, 0, 0, 255)),
+        (False, "Executing", (0, 255, 0, 255)),
     ):
         left, top, right, bottom = font.getbbox(text)
         padding = 5
