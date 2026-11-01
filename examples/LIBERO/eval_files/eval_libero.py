@@ -191,15 +191,15 @@ def eval_libero(args: Args) -> None:
 
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
-    if args.task_suite_name == "libero_spatial":
+    if args.task_suite_name == "libero_spatial":#220
         max_steps = 220  # longest training demo has 193 steps
-    elif args.task_suite_name == "libero_object":
+    elif args.task_suite_name == "libero_object":#280
         max_steps = 280  # longest training demo has 254 steps
-    elif args.task_suite_name == "libero_goal":
-        max_steps = 300  # longest training demo has 270 steps
-    elif args.task_suite_name == "libero_10":
+    elif args.task_suite_name == "libero_goal":#300
+        max_steps = 600  # longest training demo has 270 steps
+    elif args.task_suite_name == "libero_10":#520
         max_steps = 520  # longest training demo has 505 steps
-    elif args.task_suite_name == "libero_90":
+    elif args.task_suite_name == "libero_90":#400
         max_steps = 400  # longest training demo has 373 steps
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")

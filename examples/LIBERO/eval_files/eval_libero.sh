@@ -4,11 +4,11 @@ set -euo pipefail
 VLA="${VLA:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 LIBERO_HOME="${LIBERO_HOME:-}"
 LIBERO_PYTHON="${LIBERO_PYTHON:-python}"
-CKPT="${CKPT:-${VLA}/playground/Pretrained_models/StarVLA/Qwen3-VL-OFT-LIBERO-4in1/checkpoints/steps_50000_pytorch_model.pt}"
+CKPT="${CKPT:-${VLA}/playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-6694}"
 TASK_SUITE_NAME="${TASK_SUITE_NAME:-libero_goal}"
-NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-5}"
+NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-2}"
 # Repeat the last complete action while inference runs; also sets replay FPS.
 REALTIME="${REALTIME:-true}"
 CONTROL_FREQ="${CONTROL_FREQ:-20}"
