@@ -162,6 +162,17 @@ class RealtimeTests(unittest.TestCase):
         self.assertEqual(executor.futures, [])
         self.assertEqual(clock.now, 0)
 
+    def test_video_labels_match_inference_waits_and_cached_execution(self):
+        with patch.object(evaluation, "_annotate_video_frame", wraps=evaluation._annotate_video_frame) as draw:
+            self.run_virtual()
+        self.assertEqual(
+            [call.args[1] for call in draw.call_args_list],
+            [True, True, True, False, False, True, True, True, False, False],
+        )
+        with patch.object(evaluation, "_annotate_video_frame", wraps=evaluation._annotate_video_frame) as draw:
+            self.run_virtual(max_steps=4, realtime=False)
+        self.assertEqual([call.args[1] for call in draw.call_args_list], [False] * 4)
+
     def test_model_failures_propagate_including_when_draining(self):
         class BrokenModel(Model):
             def step(self, **kwargs):

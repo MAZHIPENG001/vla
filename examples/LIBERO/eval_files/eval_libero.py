@@ -6,9 +6,11 @@ import os
 import pathlib
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 import imageio
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 import tqdm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -86,6 +88,49 @@ def _decode_action(response):
     return action.tolist()
 
 
+@lru_cache(maxsize=1)
+def _video_status_badges():
+    """Render the two Chinese labels once, using a font with CJK support."""
+    custom_font = os.environ.get("LIBERO_VIDEO_FONT_PATH")
+    font_paths = [custom_font] if custom_font else [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "NotoSansCJK-Regular.ttc",
+    ]
+    for font_path in font_paths:
+        try:
+            font = ImageFont.truetype(font_path, size=18)
+            break
+        except OSError:
+            continue
+    else:
+        raise RuntimeError(
+            "Cannot load a Chinese video font. Set LIBERO_VIDEO_FONT_PATH to a CJK .ttf/.ttc/.otf file."
+        )
+
+    badges = {}
+    for waiting, text, color in (
+        (True, "等待推理", (255, 0, 0, 255)),
+        (False, "正在执行", (0, 255, 0, 255)),
+    ):
+        left, top, right, bottom = font.getbbox(text)
+        padding = 5
+        badge = Image.new("RGBA", (right - left + 2 * padding, bottom - top + 2 * padding), (0, 0, 0, 180))
+        ImageDraw.Draw(badge).text((padding - left, padding - top), text, font=font, fill=color)
+        badges[waiting] = badge
+    return badges
+
+
+def _annotate_video_frame(frame, waiting):
+    """Overlay status on a copy; model observations retain their original pixels."""
+    image = Image.fromarray(frame).copy()
+    badge = _video_status_badges()[waiting]
+    image.paste(badge, (8, 8), badge)
+    return np.asarray(image)
+
+
 def _run_episode(env, client_model, obs, task_description, args, max_steps):
     """Run one rollout, counting inference waits against the simulation budget.
 
@@ -93,10 +138,12 @@ def _run_episode(env, client_model, obs, task_description, args, max_steps):
     does not skip cached actions. Only one request may be in flight, and it is
     drained before returning so it cannot mutate the next episode's cache.
     """
+    _video_status_badges()  # Validate and load the font before starting the control clock.
     for _ in range(args.num_steps_wait):
         obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
 
     replay_images = []
+    replay_waiting = []
     policy_step = wait_steps = 0
     done = False
     pending = None
@@ -127,7 +174,8 @@ def _run_episode(env, client_model, obs, task_description, args, max_steps):
                     pending = None
                     action = _decode_action(response)
 
-                if action is None:
+                waiting_for_inference = action is None
+                if waiting_for_inference:
                     # Keep sending the complete last command while inference
                     # runs, including its translation, rotation and gripper.
                     action = last_action.copy()
@@ -140,6 +188,7 @@ def _run_episode(env, client_model, obs, task_description, args, max_steps):
                 # Include every physics/control step, including terminal and
                 # inference-wait steps, in the video.
                 replay_images.append(np.ascontiguousarray(obs["agentview_image"][::-1, ::-1]))
+                replay_waiting.append(waiting_for_inference)
                 next_tick += period
                 if done:
                     break
@@ -165,6 +214,12 @@ def _run_episode(env, client_model, obs, task_description, args, max_steps):
             "inference latency in simulated seconds may be underestimated.",
             elapsed / sim_seconds,
         )
+    # Draw after the rollout so text rendering cannot affect control timing or
+    # the camera images used for the next model request.
+    replay_images = [
+        _annotate_video_frame(frame, waiting)
+        for frame, waiting in zip(replay_images, replay_waiting)
+    ]
     return replay_images, done
 
 
