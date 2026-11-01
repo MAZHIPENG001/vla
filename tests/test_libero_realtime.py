@@ -112,7 +112,7 @@ class RealtimeTests(unittest.TestCase):
             frames, done = evaluation._run_episode(env, model, env.obs(), "task", args, max_steps)
         return env, model, frames, done, clock, executor
 
-    def test_inference_wait_repeats_complete_last_action_and_preserves_cache_indices(self):
+    def test_inference_wait_holds_pose_and_preserves_gripper_and_cache_indices(self):
         env, model, frames, done, clock, executor = self.run_virtual()
         self.assertFalse(done)
         self.assertEqual(len(frames), 10)
@@ -123,9 +123,13 @@ class RealtimeTests(unittest.TestCase):
         for action in env.actions[:3]:
             self.assertEqual(action, evaluation.LIBERO_DUMMY_ACTION)
         np.testing.assert_allclose(env.actions[3], [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 1])
-        # The second request repeats ALL SEVEN values of the last cache action.
+        # The second request must stop translation AND rotation, while keeping
+        # the last closed-gripper command instead of reopening the gripper.
         for action in env.actions[5:8]:
-            self.assertEqual(action, env.actions[4])
+            self.assertEqual(action[:6], [0.0] * 6)
+            self.assertEqual(action[-1], env.actions[4][-1])
+            self.assertEqual(action[-1], 1.0)
+            self.assertNotEqual(action, env.actions[4])
         self.assertNotEqual(env.actions[8], env.actions[4])
         # Request 2 captures the latest frame at submission, before waiting.
         self.assertEqual(model.observation_indices, [0, 4, 5, 9])

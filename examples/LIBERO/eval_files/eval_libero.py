@@ -133,7 +133,7 @@ def _run_episode(env, client_model, obs, task_description, args, max_steps):
     policy_step = wait_steps = 0
     done = False
     pending = None
-    last_action = LIBERO_DUMMY_ACTION.copy()
+    hold_action = LIBERO_DUMMY_ACTION.copy()
     period = 1.0 / args.control_freq
     started = time.monotonic()
     next_tick = started
@@ -162,12 +162,12 @@ def _run_episode(env, client_model, obs, task_description, args, max_steps):
 
                 waiting_for_inference = action is None
                 if waiting_for_inference:
-                    # Keep sending the complete last command while inference
-                    # runs, including its translation, rotation and gripper.
-                    action = last_action.copy()
+                    # OSC_POSE commands are deltas: zero arm deltas hold the
+                    # current pose; retain only the last gripper command.
+                    action = hold_action.copy()
                     wait_steps += 1
                 else:
-                    last_action = action.copy()
+                    hold_action[-1] = action[-1]
                     policy_step += 1
 
                 obs, _, done, _ = env.step(action)

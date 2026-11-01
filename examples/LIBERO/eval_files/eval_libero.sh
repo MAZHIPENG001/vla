@@ -9,8 +9,9 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-6694}"
 TASK_SUITE_NAME="${TASK_SUITE_NAME:-libero_goal}"
 NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-2}"
-# Repeat the last complete action while inference runs; also sets replay FPS.
+# Keep simulation running while inference waits with zero arm deltas.
 REALTIME="${REALTIME:-true}"
+# Simulation control frequency and replay FPS.
 CONTROL_FREQ="${CONTROL_FREQ:-20}"
 
 case "${REALTIME}" in
