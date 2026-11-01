@@ -98,6 +98,13 @@ class ModelClient:
         self.previous_gripper_action = None
         self.raw_actions = None
 
+    def needs_inference(self, step: int) -> bool:
+        """Whether this policy action needs a server request instead of the cache."""
+        return self.raw_actions is None or step % self.action_chunk_size == 0
+
+    def close(self) -> None:
+        self.client.close()
+
     def step(self, example: dict, step: int = 0, **kwargs) -> dict:
         """One env step.
 
@@ -129,7 +136,7 @@ class ModelClient:
             example = {**example, "image": resized}
 
         # Refresh chunk if needed.
-        if step % self.action_chunk_size == 0 or self.raw_actions is None:
+        if self.needs_inference(step):
             vla_input = {
                 "examples": [example],
                 "unnorm_key": self.unnorm_key,

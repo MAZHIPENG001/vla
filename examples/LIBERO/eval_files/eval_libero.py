@@ -5,17 +5,13 @@ import math
 import os
 import pathlib
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import imageio
 import numpy as np
-from PIL import Image
 import tqdm
-import tyro
-from libero.libero import benchmark, get_libero_path
-from libero.libero.envs import OffScreenRenderEnv
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-from examples.LIBERO.eval_files.model2libero_interface import ModelClient
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -39,9 +35,11 @@ class Args:
     task_suite_name: str = (
         "libero_goal"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
-    num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
+    num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize in sim.
     num_trials_per_task: int = 50  # Number of rollouts per task
     max_tasks: int = -1  # If > 0, limit the number of tasks evaluated (smoke / quick check). -1 = run all.
+    realtime: bool = True  # Advance simulation while inference runs in a worker thread.
+    control_freq: int = 20  # Simulation control frequency and replay FPS, in Hz.
 
     #################################################################################################################
     # Utils
@@ -60,7 +58,124 @@ class Args:
     job_name: str = "test"
 
 
+def _make_model_example(obs, task_description):
+    # Copy camera buffers before sending them to the inference thread. LIBERO's
+    # renderer and all env.step calls stay on the main thread (OpenGL context).
+    return {
+        "image": [
+            np.ascontiguousarray(obs["agentview_image"][::-1, ::-1]),
+            np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1]),
+        ],
+        "lang": str(task_description),
+    }
+
+
+def _decode_action(response):
+    raw_action = response["raw_action"]
+    world_vector = np.asarray(raw_action.get("world_vector"), dtype=np.float32).reshape(-1)
+    rotation = np.asarray(raw_action.get("rotation_delta"), dtype=np.float32).reshape(-1)
+    gripper = np.asarray(raw_action.get("open_gripper"), dtype=np.float32).reshape(-1)
+    if (world_vector.size, rotation.size, gripper.size) != (3, 3, 1):
+        raise ValueError(
+            f"Invalid action sizes: world_vector={world_vector.shape}, "
+            f"rotation_delta={rotation.shape}, gripper={gripper.shape}"
+        )
+    action = np.concatenate([world_vector, rotation, _binarize_gripper_open(gripper)])
+    if not np.isfinite(action).all() or not np.isfinite(gripper).all():
+        raise ValueError("Model returned a non-finite action")
+    return action.tolist()
+
+
+def _run_episode(env, client_model, obs, task_description, args, max_steps):
+    """Run one rollout, counting inference waits against the simulation budget.
+
+    Policy indices advance only when a predicted action is consumed. Waiting
+    does not skip cached actions. Only one request may be in flight, and it is
+    drained before returning so it cannot mutate the next episode's cache.
+    """
+    for _ in range(args.num_steps_wait):
+        obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
+
+    replay_images = []
+    policy_step = wait_steps = 0
+    done = False
+    pending = None
+    last_action = LIBERO_DUMMY_ACTION.copy()
+    period = 1.0 / args.control_freq
+    started = time.monotonic()
+    next_tick = started
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="libero-inference") as executor:
+        try:
+            for _ in range(max_steps):
+                if args.realtime:
+                    delay = next_tick - time.monotonic()
+                    if delay > 0:
+                        time.sleep(delay)
+
+                action = None
+                if pending is None:
+                    example = _make_model_example(obs, task_description)
+                    if args.realtime and client_model.needs_inference(policy_step):
+                        pending = executor.submit(client_model.step, example=example, step=policy_step)
+                    else:
+                        # Cache hits must not incur an extra control tick.
+                        action = _decode_action(client_model.step(example=example, step=policy_step))
+
+                if pending is not None and pending.done():
+                    response = pending.result()  # Propagate inference failures.
+                    pending = None
+                    action = _decode_action(response)
+
+                if action is None:
+                    # Keep sending the complete last command while inference
+                    # runs, including its translation, rotation and gripper.
+                    action = last_action.copy()
+                    wait_steps += 1
+                else:
+                    last_action = action.copy()
+                    policy_step += 1
+
+                obs, _, done, _ = env.step(action)
+                # Include every physics/control step, including terminal and
+                # inference-wait steps, in the video.
+                replay_images.append(np.ascontiguousarray(obs["agentview_image"][::-1, ::-1]))
+                next_tick += period
+                if done:
+                    break
+
+            if args.realtime:
+                # The final env.step advances one full control period too.
+                delay = next_tick - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+            elapsed = time.monotonic() - started
+        finally:
+            if pending is not None:
+                pending.result()
+
+    sim_seconds = len(replay_images) * period
+    logging.info(
+        "Rollout timing: sim=%.3fs, wall=%.3fs, policy_actions=%d, inference_wait_steps=%d",
+        sim_seconds, elapsed, policy_step, wait_steps,
+    )
+    if args.realtime and elapsed > sim_seconds * 1.1:
+        logging.warning(
+            "Simulation did not keep up with real time (%.2fx wall/sim); "
+            "inference latency in simulated seconds may be underestimated.",
+            elapsed / sim_seconds,
+        )
+    return replay_images, done
+
+
 def eval_libero(args: Args) -> None:
+    from libero.libero import benchmark
+    from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+
+    if args.control_freq <= 0:
+        raise ValueError("control_freq must be positive")
+    if args.num_steps_wait < 0:
+        raise ValueError("num_steps_wait must be non-negative")
     logging.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
 
     # Set random seed
@@ -101,153 +216,81 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(n_eval_tasks)):
-        # Get task
-        task = task_suite.get_task(task_id)
+    try:
+        for task_id in tqdm.tqdm(range(n_eval_tasks)):
+            # Get task
+            task = task_suite.get_task(task_id)
 
-        # Get default LIBERO initial states
-        initial_states = task_suite.get_task_init_states(task_id)
+            # Get default LIBERO initial states
+            initial_states = task_suite.get_task_init_states(task_id)
 
-        # Initialize LIBERO environment and task description
-        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+            # Initialize LIBERO environment and task description
+            env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed, args.control_freq)
 
-        # Start episodes
-        task_episodes, task_successes = 0, 0
-        for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
-            logging.info(f"\nTask: {task_description}")
+            try:
+                # Start episodes
+                task_episodes, task_successes = 0, 0
+                for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
+                    logging.info(f"\nTask: {task_description}")
 
-            # Reset environment
-            client_model.reset(task_description=task_description)  # Reset the client connection
-            env.reset()
+                    # Reset environment
+                    client_model.reset(task_description=task_description)  # Reset the client connection
+                    env.reset()
 
-            # Set initial states
-            obs = env.set_init_state(initial_states[episode_idx])
+                    # Set initial states
+                    obs = env.set_init_state(initial_states[episode_idx])
 
-            # Setup
-            t = 0
-            replay_images = []
-            full_actions = []
-
-            logging.info(f"Starting episode {task_episodes + 1}...")
-            step = 0
-
-            # full_actions = np.load("./debug/action.npy")
-
-            while t < max_steps + args.num_steps_wait:
-                # try:
-                # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
-                # and we need to wait for them to fall
-                if t < args.num_steps_wait:
-                    obs, reward, done, info = env.step(LIBERO_DUMMY_ACTION)
-                    t += 1
-                    continue
-
-                # IMPORTANT: rotate 180 degrees to match train preprocessing
-                img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-                wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
-                # Save preprocessed image for replay video
-                replay_images.append(img)
-
-                state = np.concatenate(
-                    (
-                        obs["robot0_eef_pos"],
-                        _quat2axisangle(obs["robot0_eef_quat"]),
-                        obs["robot0_gripper_qpos"],
+                    logging.info(f"Starting episode {task_episodes + 1}...")
+                    replay_images, done = _run_episode(
+                        env, client_model, obs, task_description, args, max_steps
                     )
-                )
+                    if done:
+                        task_successes += 1
+                        total_successes += 1
 
-                observation = {  #
-                    "observation.primary": np.expand_dims(img, axis=0),  # (H, W, C), dtype=unit8, range(0-255)
-                    "observation.wrist_image": np.expand_dims(wrist_img, axis=0),  # (H, W, C)
-                    "observation.state": np.expand_dims(state, axis=0),
-                    "instruction": [str(task_description)],
-                }
+                    task_episodes += 1
+                    total_episodes += 1
 
-                # align key with model API --> two images provided here --> check training
-                example_dict = {
-                    "image": [observation["observation.primary"][0], observation["observation.wrist_image"][0]],
-                    "lang": observation["instruction"][0],
-                    # Match training: current EEF position, axis-angle, and two gripper joints.
-                    # "state": observation["observation.state"].astype(np.float16),  # (1, 8)
-                }
-
-                # start_time = time.time()
-
-                response = client_model.step(example=example_dict, step=step)
-
-                # end_time = time.time()
-                # print(f"time: {end_time - start_time}")
-
-                # #
-                raw_action = response["raw_action"]
-
-                world_vector_delta = np.asarray(raw_action.get("world_vector"), dtype=np.float32).reshape(-1)
-                rotation_delta = np.asarray(raw_action.get("rotation_delta"), dtype=np.float32).reshape(-1)
-                open_gripper = np.asarray(raw_action.get("open_gripper"), dtype=np.float32).reshape(-1)
-                gripper = _binarize_gripper_open(open_gripper)
-
-                if not (world_vector_delta.size == 3 and rotation_delta.size == 3 and open_gripper.size == 1):
-                    logging.warning(
-                        f"Unexpected action sizes: "
-                        f"wv={world_vector_delta.shape}, rot={rotation_delta.shape}, grip={gripper.shape}. "
-                        f"Falling back to LIBERO_DUMMY_ACTION."
+                    # Save a replay video of the episode
+                    suffix = "success" if done else "failure"
+                    task_segment = task_description.replace(" ", "_")
+                    imageio.mimwrite(
+                        pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
+                        [np.asarray(x) for x in replay_images],
+                        fps=args.control_freq,
                     )
-                    raise ValueError(
-                        f"Invalid action sizes: world_vector={world_vector_delta.shape}, "
-                        f"rotation_delta={rotation_delta.shape}, gripper={gripper.shape}"
-                    )
-                else:
-                    delta_action = np.concatenate([world_vector_delta, rotation_delta, gripper], axis=0)
 
-                full_actions.append(delta_action)
+                    # Log current results
+                    logging.info(f"Success: {done}")
+                    logging.info(f"# episodes completed so far: {total_episodes}")
+                    logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
-                # __import__("ipdb").set_trace()
-                # see ../robosuite/controllers/controller_factory.py
-                obs, reward, done, info = env.step(delta_action.tolist())
-                if done:
-                    task_successes += 1
-                    total_successes += 1
-                    break
-                t += 1
-                step += 1
+            finally:
+                env.close()
 
-            task_episodes += 1
-            total_episodes += 1
+            # Log final results
+            logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
+            logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
-            # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+        logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
+        logging.info(f"Total episodes: {total_episodes}")
 
-            full_actions = np.stack(full_actions)
-            # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
-
-            # print(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4")
-            # Log current results
-            logging.info(f"Success: {done}")
-            logging.info(f"# episodes completed so far: {total_episodes}")
-            logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
-
-        # Log final results
-        logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-        logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
-
-    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
-    logging.info(f"Total episodes: {total_episodes}")
+    finally:
+        client_model.close()
 
 
-def _get_libero_env(task, resolution, seed):
+def _get_libero_env(task, resolution, seed, control_freq=20):
     """Initializes and returns the LIBERO environment, along with the task description."""
+    from libero.libero import get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv
+
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
     env_args = {
         "bddl_file_name": task_bddl_file,
         "camera_heights": resolution,
         "camera_widths": resolution,
+        "control_freq": control_freq,
     }
     env = OffScreenRenderEnv(**env_args)
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
@@ -292,4 +335,6 @@ if __name__ == "__main__":
     )
     if os.getenv("DEBUG", False):
         start_debugpy_once()
+    import tyro
+
     tyro.cli(eval_libero)
