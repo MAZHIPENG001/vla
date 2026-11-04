@@ -132,8 +132,7 @@ conda deactivate
 source .venv/bin/activate
 
 export CKPT=playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
-TRANSFORMERS_VERBOSITY=error PORT=6694 \
-  bash examples/LIBERO/eval_files/run_policy_server.sh --gpu-id 2
+TRANSFORMERS_VERBOSITY=error bash examples/LIBERO/eval_files/run_policy_server.sh --gpu-id 7
 ```
 state 默认输入模型；启动日志中的 `include_state` 应为 `True`。
 LIBERO 状态为当前帧的 8 维 EEF 位置、axis-angle 旋转向量和双指 qpos。
@@ -152,7 +151,7 @@ export LIBERO_HOME=/mnt/data/3dgs/mzp/LIBERO
 export LIBERO_PYTHON="$PWD/.venv/bin/python"
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
-PORT=6694 bash examples/LIBERO/eval_files/eval_libero.sh --gpu-id 2
+bash examples/LIBERO/eval_files/eval_libero.sh --gpu-id 7
 ```
 
 两个脚本均支持 `--gpu-id N`（也接受 `--gpu-id=N`）或环境变量 `GPU_ID=N`。

@@ -4,7 +4,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, field
 import math
 
-DEFAULT_DATA_PATH = Path(__file__).resolve().parent.parent / "playground/Dataset/demo_clean_repo"
+DEFAULT_DATA_PATH = Path(__file__).resolve().parent.parent / "playground/Datasets/demo_clean_repo"
 
 # 语义角色 -> 数据集中可能使用的字段名。适配新字段时，在此追加别名。
 # 多个候选同时存在时，使用 --state-key / --action-key 指定实际字段。

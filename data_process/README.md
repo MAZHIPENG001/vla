@@ -63,6 +63,7 @@ data_process/
 ├── config.py        # 默认路径、字段别名、质量策略及参数解析
 ├── dataset.py       # Parquet 读取、图像解码、字段适配与 Task / Episode 模型
 ├── processing.py    # 质量检查、指标缓存、报告与分阶段统计
+├── semantic_segmentation.py # 本地视觉语言模型语义分段（独立命令行模块）
 ├── report_store.py  # 按数据集 / 检测轮次 / Episode 保存、校验和导入报告
 ├── application.py   # 浏览数据、图像编码、后台质量任务和 JSON 转换
 ├── web_server.py    # HTTP 路由、静态资源、服务生命周期
@@ -115,7 +116,8 @@ State / Action 别名位于 `config.py` 的 `FIELD_ALIASES`。字段不匹配或
 ```
 
 维度名来自元数据，缺失时使用 `dim_0` 等；多轴数值按原始顺序展平绘图，原始字段和形状保留。
-State / Action 仅按维度索引对比，不推断单位或动作含义。目前不支持外部视频、LeRobot v3 和 HDF5。
+State / Action 仅按维度索引对比，不推断单位或动作含义。浏览读取器目前不支持外部视频、LeRobot v3 和 HDF5。
+下面的独立语义分段模块另行支持 LeRobot v2 外部视频。
 
 ```python
 from data_process import BrowserModel, LeRobotReader
@@ -129,6 +131,118 @@ episode = model.read_episode(0)
 state, action = episode.state, episode.action  # (帧数, 实际维度数)
 values = episode.frame(10)                    # 保留原始字段名和形状
 images = model.read_images(0, 10)             # CHW RGB uint8
+```
+
+## 长程任务语义分段
+
+`semantic_segmentation.py` 是独立的离线标注模块，使用完整任务描述与按时间排列的多帧画面，
+输出每个子任务对应的原始区间。需要项目完整模型环境；普通浏览和质量检查仍不依赖 PyTorch。
+不修改数据集，不启动 Web 服务；本版本将标注保存为 JSON，尚未接入浏览页面或训练 DataLoader。
+
+在项目根目录先验证数据路径、相机和抽帧，不加载模型、不生成报告：
+
+```bash
+source .venv/bin/activate
+python -m data_process.semantic_segmentation \
+  --path playground/Datasets/demo_clean_repo \
+  --episodes 0 \
+  --dry-run
+```
+
+使用本地模型标注指定轨迹：
+
+```bash
+python -m data_process.semantic_segmentation \
+  --path playground/Datasets/demo_clean_repo \
+  --episodes 0 1 2 \
+  --model-path playground/Pretrained_models/Qwen3-VL-4B-Instruct \
+  --cameras observation.images.cam_high \
+  --device cuda:0
+```
+
+省略 `--episodes` 处理全集；省略 `--cameras` 使用元数据中的第一路相机。可以提供多个相机字段，
+同一时刻的画面会附相机名一起送入模型。多相机会增加视觉 token 和显存用量，首次运行建议先选单条 Episode。
+任务默认从 Episode 元数据或 `task_index` 获取；缺失或有多个任务时，用 `--task "完整任务描述"` 明确指定。
+
+`--model-path` 只接受本地模型目录，按 `config.json` 自动选择 Transformers 多模态架构，
+不下载权重、不执行远程模型代码。可选择本机的 `Qwen2.5-VL-3B-Instruct`、`Qwen3-VL-2B-Instruct`、
+`Qwen3-VL-4B-Instruct` 或 `Qwen3.5-4B`。默认 SDPA 和自动精度；可以用 `--dtype float16` 等覆盖。
+`--device cpu` 使用 CPU，默认 float32，模型推理会很慢且需要较多内存。
+本模块直接处理带帧标识的多图输入，不依赖新版 `qwen-vl-utils` 视频接口。
+
+默认流程为：
+
+1. 全局均匀采样最多 32 个时刻，生成初始子任务词表；局部窗口可以补充全局预览漏掉的实际子任务。
+2. 按 20 秒窗口、4 秒重叠做语义分段；按时间以约 2 FPS 采样，每个窗口最多 40 个时刻。
+3. 以重叠区中点划分窗口归属，合并相邻同名阶段，确保覆盖整个 Episode 且无重叠。
+4. 在候选边界前后约 1.5 秒补充最多 24 个时刻，细化切换位置；模型无法支持该切换，或首张图已经属于后一个阶段时，保留粗边界并标记。
+5. 校验模型 JSON、词表及样本编号；无效响应默认重试 1 次，仍失败则记录该 Episode 失败。
+
+同一 Task 的多条轨迹需要一致名称时，建议显式提供经过检查的词表：
+
+```bash
+python -m data_process.semantic_segmentation \
+  --path /path/to/dataset \
+  --episodes 0 1 \
+  --labels "接近抽屉把手" "打开抽屉" "抓取方块" "将方块放入抽屉" "关闭抽屉"
+```
+
+词表会自动加入“等待”“重试／失败恢复”“无法判断”；指定词表时不接受其他名称。
+未指定时，每条 Episode 独立发现词表，不保证跨轨迹名称完全一致。
+
+采样与显存相关参数：
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `--sample-fps` | 2 | 局部窗口的目标采样率；仍受帧数上限限制 |
+| `--window-seconds` / `--overlap-seconds` | 20 / 4 | 时间窗口及重叠长度 |
+| `--max-frames` / `--overview-frames` | 40 / 32 | 每个窗口 / 全局预览最多采样的时刻数 |
+| `--image-max-side` | 448 | 送入处理器前的图片最长边；处理器仍会按模型要求对齐尺寸 |
+| `--refine-seconds` / `--refine-frames` | 1.5 / 24 | 边界细化半径 / 最大采样时刻数；半径为 0 时禁用 |
+| `--max-new-tokens` / `--retries` | 2048 / 1 | 每次生成的 token 上限 / JSON 校验失败重试次数 |
+
+采样保留区间首尾，按真实时间选取，去重后不超过上限。帧数上限可能使实际采样率低于目标值。
+粗边界的不确定范围大于细化半径时，会覆盖该候选范围并遵守相邻阶段边界和采样上限。
+快速动作应提高采样密度；边界范围是模型判断下的采样候选范围，不是统计置信区间，也不保证真实边界一定在内。
+
+支持 LeRobot v2.0 / v2.1 的内嵌图像及按 Episode 保存的外部视频。外部视频根据 `video_path` 定位，
+用 PyAV 按 PTS 抽帧；要求数据行时间戳为 Episode 相对秒数，且与视频时钟对齐。
+优先使用真实 `timestamp`，要求有限且严格递增；缺失时才按 FPS 估计，并在报告中标为 `estimated_from_fps`。
+`--dry-run` 只解码全局预览的采样图，不代表全集图像已通过质量检查。
+
+默认输出目录为 `data_process/output/semantic_segmentation/`，可通过 `--output` 覆盖，必须位于源数据集之外。
+每次运行创建独立目录（UTC 时间及随机标识），逐 Episode 保存：
+
+```text
+semantic_segmentation/<run>/
+├── manifest.json
+├── episode_000000.json
+└── episode_000001.json
+```
+
+每个 `segments` 元素包含：
+
+- `start_frame` / `end_frame_exclusive`：Episode 内原始行索引，采用左闭右开区间；不是抽帧后的编号。
+- `start_frame_index` / `last_frame_index`：原始数据的帧标识；缺少 `frame_index` 时使用行索引。
+- `start_time` / `last_time`：区间中第一帧、最后一帧的原始时间戳，时间范围两端均包含。
+- `subtask` / `evidence`：子任务名称及可见证据。
+- `boundary_before`：起始切换点的候选行范围 `[lower_row, upper_row]`、来源和细化证据；第一段为 `null`。
+
+报告还记录任务、相机、模型路径及架构、参数、提示词版本、每次请求的采样行与时间、原始模型响应和校验错误。
+`manifest.json` 保存成功 / 失败 Episode；有失败时状态为 `partial`，命令退出码为 1；全部成功才标记 `complete`。
+按 Ctrl+C 停止会标记 `interrupted` 并保留已完成报告；进程被强制结束时可能保留 `running`，不能当作完整结果。
+标注结果应抽样复核，特别是抓取、释放、等待与重试阶段。
+
+也可从 Python 调用：
+
+```python
+from data_process import LeRobotReader
+from data_process.semantic_segmentation import EpisodeSource, SemanticSegmenter, TransformersVisionModel
+
+reader = LeRobotReader("playground/Datasets/demo_clean_repo")
+source = EpisodeSource(reader, episode=0, cameras=["observation.images.cam_high"])
+backend = TransformersVisionModel("playground/Pretrained_models/Qwen3-VL-4B-Instruct")
+report = SemanticSegmenter(backend).segment(source)
 ```
 
 ## 帧 / 区间异常检测
