@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from dataclasses import asdict, dataclass, field
+from fnmatch import fnmatchcase
 import math
 
 DEFAULT_DATA_PATH = Path(__file__).resolve().parent.parent / "playground/Datasets/demo_clean_repo"
@@ -12,6 +13,62 @@ FIELD_ALIASES = {
     "state": ("observation.state", "observations.state", "state", "robot_state"),
     "action": ("action", "actions", "robot_action"),
 }
+
+# 相机使用去掉字段前缀后的名称匹配；左右腕部保持独立，避免混淆视角。
+CAMERA_ALIASES = {
+    "primary": ("image", "primary_image", "cam_high", "cam_front", "front_image",
+                "agentview_image", "agentview_rgb", "rgb_static"),
+    "wrist": ("wrist", "wrist_image", "cam_wrist", "image_wrist", "eye_in_hand_image",
+              "eye_in_hand_rgb", "robot0_eye_in_hand_image", "robot0_eye_in_hand_rgb", "rgb_gripper"),
+    "left_wrist": ("cam_left_wrist", "left_wrist_image", "left_wrist"),
+    "right_wrist": ("cam_right_wrist", "right_wrist_image", "right_wrist"),
+}
+
+
+def resolve_camera_keys(available, requested=None):
+    """Resolve exact keys, short names, camera aliases or explicit glob patterns.
+
+    An alias must identify one camera. Globs intentionally select multiple
+    cameras, preserving metadata order; overlapping selections are deduplicated.
+    """
+    available = list(available)
+    if not available:
+        raise ValueError("数据集中没有可用相机")
+    if requested is None:
+        return available[:1]
+    if isinstance(requested, str):
+        requested = [requested]
+    if not requested:
+        raise ValueError("需要至少一路相机")
+
+    def short_name(key):
+        return key.rsplit(".", 1)[-1].casefold()
+
+    resolved = []
+    for query in requested:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("相机名称必须是非空字符串")
+        if query in available:
+            matches = [query]
+        elif any(character in query for character in "*?["):
+            matches = [key for key in available if fnmatchcase(key.casefold(), query.casefold())
+                       or fnmatchcase(short_name(key), short_name(query))]
+        else:
+            # Prefer the same name under another namespace over a role alias.
+            matches = [key for key in available if short_name(key) == short_name(query)]
+            if not matches:
+                aliases = next((set(names) | {role} for role, names in CAMERA_ALIASES.items()
+                                if short_name(query) in (*names, role)), set())
+                matches = [key for key in available if short_name(key) in aliases]
+            if len(matches) > 1:
+                raise ValueError(f"相机 {query!r} 匹配多个字段: {matches}；请指定完整字段名，"
+                                 "或使用带通配符的表达式选择多路相机")
+        if not matches:
+            raise ValueError(f"相机 {query!r} 没有匹配字段；可用相机: {available}")
+        for key in matches:
+            if key not in resolved:
+                resolved.append(key)
+    return resolved
 
 
 @dataclass(frozen=True)

@@ -164,6 +164,27 @@ python -m data_process.semantic_segmentation \
 同一时刻的画面会附相机名一起送入模型。多相机会增加视觉 token 和显存用量，首次运行建议先选单条 Episode。
 任务默认从 Episode 元数据或 `task_index` 获取；缺失或有多个任务时，用 `--task "完整任务描述"` 明确指定。
 
+`--cameras` 支持完整字段名、去掉前缀的短名称、相机别名和通配符。完整字段名优先；
+不同数据集的 `observation.images.cam_high`、`primary_image`、`image` 可作为主相机的别名匹配，
+`cam_wrist` 与 `wrist_image` 等可作为腕部相机的别名匹配。别名在 `config.py` 的 `CAMERA_ALIASES` 中维护。
+例如，Piper 数据只有 `image` / `wrist_image` 时，原来的 `--cameras observation.images.cam_high`
+会解析为 `image`，无需修改源数据字段。左右腕部别名独立，不自动混用。
+
+```bash
+# 用角色别名选择主相机和腕部相机
+python -m data_process.semantic_segmentation \
+  --path playground/Datasets/piper_dataset --episodes 0 \
+  --cameras primary wrist --dry-run
+
+# 通配符可选择多路相机；加引号，避免被 shell 当作本地文件名展开
+python -m data_process.semantic_segmentation \
+  --path playground/Datasets/piper_dataset --episodes 0 \
+  --cameras '*image*' --dry-run
+```
+
+短名称和别名必须唯一匹配，否则列出候选并提示指定完整名称；通配符允许匹配多路。
+重复选中的相机自动去重，保持选择顺序。启动日志、预检及报告使用解析后的真实字段名。
+
 `--model-path` 只接受本地模型目录，按 `config.json` 自动选择 Transformers 多模态架构，
 不下载权重、不执行远程模型代码。可选择本机的 `Qwen2.5-VL-3B-Instruct`、`Qwen3-VL-2B-Instruct`、
 `Qwen3-VL-4B-Instruct` 或 `Qwen3.5-4B`。默认 SDPA 和自动精度；可以用 `--dtype float16` 等覆盖。

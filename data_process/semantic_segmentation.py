@@ -18,6 +18,7 @@ import uuid
 import numpy as np
 from PIL import Image
 
+from .config import resolve_camera_keys
 from .dataset import LeRobotReader
 
 
@@ -69,11 +70,7 @@ class EpisodeSource:
         self.length = reader.episodes[episode]["length"]
         if self.length <= 0:
             raise ValueError(f"Episode {episode} 没有帧")
-        self.cameras = list(cameras) if cameras else reader.camera_keys[:1]
-        if not self.cameras or len(set(self.cameras)) != len(self.cameras):
-            raise ValueError("需要至少一路相机，且相机不能重复")
-        if any(camera not in reader.camera_keys for camera in self.cameras):
-            raise ValueError(f"相机不存在；可用相机: {reader.camera_keys}")
+        self.cameras = resolve_camera_keys(reader.camera_keys, cameras)
         columns = [key for key in ("timestamp", "frame_index", "task_index") if key in reader.features]
         values = reader.read_episode(episode, columns=columns) if columns else {}
         if "timestamp" in values:
@@ -435,7 +432,7 @@ def build_parser():
     parser.add_argument("--path", type=Path, required=True, help="LeRobot v2 数据集根目录")
     parser.add_argument("--model-path", type=Path, default=Path("playground/Pretrained_models/Qwen3-VL-4B-Instruct"))
     parser.add_argument("--episodes", type=int, nargs="+", help="Episode 编号；省略则处理全集")
-    parser.add_argument("--cameras", nargs="+", help="相机字段；默认使用元数据中的第一路")
+    parser.add_argument("--cameras", nargs="+", help="相机字段、短名称、别名或通配符；默认使用第一路")
     parser.add_argument("--task", help="覆盖完整任务描述；多任务 Episode 必须明确指定")
     parser.add_argument("--labels", nargs="+", help="可选子任务词表；省略时逐 Episode 生成")
     parser.add_argument("--output", type=Path, default=Path("data_process/output/semantic_segmentation"))
@@ -475,7 +472,8 @@ def main(argv=None):
                                       overview_rows=rows, windows=source.windows(config)), ensure_ascii=False))
             return 0
         # Validate the first episode before spending time loading model weights.
-        EpisodeSource(reader, episodes[0], args.cameras, args.task)
+        source = EpisodeSource(reader, episodes[0], args.cameras, args.task)
+        print(f"相机字段: {', '.join(source.cameras)}", flush=True)
         backend = TransformersVisionModel(args.model_path, args.device, args.dtype, args.max_new_tokens)
         segmenter = SemanticSegmenter(backend, config)
         run = output / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])

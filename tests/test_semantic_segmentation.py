@@ -13,6 +13,7 @@ from PIL import Image
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from data_process.config import resolve_camera_keys
 from data_process.dataset import LeRobotReader
 from data_process.semantic_segmentation import (
     EpisodeSource, SegmentationConfig, SemanticSegmenter, main,
@@ -90,6 +91,42 @@ class SemanticSegmentationTests(unittest.TestCase):
 
     def source(self, **kwargs):
         return EpisodeSource(LeRobotReader(self.dataset), 0, **kwargs)
+
+    def test_camera_aliases_use_real_dataset_keys_for_decoding_and_reports(self):
+        for old, new in (("camera", "image"), ("wrist", "wrist_image")):
+            self.features[new] = self.features.pop(old)
+            self.data[new] = self.data.pop(old)
+        self._write_info()
+        self._write_data()
+        source = self.source(cameras=["observation.images.cam_high", "observation.images.cam_wrist"])
+        self.assertEqual(source.cameras, ["image", "wrist_image"])
+        self.assertEqual(set(source.images([0], 32)[0]), {"image", "wrist_image"})
+        report = SemanticSegmenter(ScriptedVisionModel(), self.config).segment(source)
+        self.assertEqual(report["cameras"], ["image", "wrist_image"])
+
+    def test_camera_resolution_prefers_exact_names_and_handles_prefixes_and_globs(self):
+        available = ["observation.images.cam_high", "observation.images.cam_left_wrist",
+                     "observation.images.cam_right_wrist", "video.primary_image"]
+        self.assertEqual(resolve_camera_keys(available, ["observation.images.cam_high"]), available[:1])
+        self.assertEqual(resolve_camera_keys(available, ["video.cam_high"]), available[:1])
+        self.assertEqual(resolve_camera_keys(available, ["PRIMARY_IMAGE"]), ["video.primary_image"])
+        self.assertEqual(resolve_camera_keys(available, ["*wrist*", "cam_left_wrist"]), available[1:3])
+        self.assertEqual(resolve_camera_keys(["image", "wrist_image"], ["observation.images.*"]),
+                         ["image", "wrist_image"])
+        self.assertEqual(resolve_camera_keys(available), available[:1])
+        self.assertEqual(resolve_camera_keys(["video.wrist_image"], ["cam_wrist"]), ["video.wrist_image"])
+
+    def test_camera_resolution_rejects_missing_or_ambiguous_names(self):
+        with self.assertRaisesRegex(ValueError, "匹配多个字段"):
+            resolve_camera_keys(["video.primary_image", "observation.images.cam_high"], ["image"])
+        with self.assertRaisesRegex(ValueError, "匹配多个字段"):
+            resolve_camera_keys(["left.image", "right.image"], ["image"])
+        with self.assertRaisesRegex(ValueError, "可用相机"):
+            resolve_camera_keys(["image", "wrist_image"], ["unknown_camera"])
+        with self.assertRaisesRegex(ValueError, "可用相机"):
+            resolve_camera_keys(["image", "wrist_image"], ["*depth*"])
+        with self.assertRaisesRegex(ValueError, "可用相机"):
+            resolve_camera_keys(["cam_left_wrist", "cam_right_wrist"], ["cam_wrist"])
 
     def test_overlapping_windows_refine_boundaries_and_keep_original_identifiers(self):
         before = {path: path.read_bytes() for path in self.dataset.rglob("*") if path.is_file()}
