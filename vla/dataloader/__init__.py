@@ -51,7 +51,7 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe", *, dataset=None, pr
             if profile not in profiles:
                 raise ValueError(f"unknown datasets.vla_data profile: {profile}")
             data_cfg = OmegaConf.merge(data_cfg, profiles[profile])
-        elif OmegaConf.select(full_cfg, "framework.name") == "QwenOFTRecap":
+        elif OmegaConf.select(full_cfg, "framework.name") in ("QwenOFTRecap", "QwenPI_Recap"):
             conditioning = OmegaConf.select(full_cfg, "framework.advantage_conditioning", default={})
             if not conditioning.get("enabled", True):
                 data_cfg.return_online_advantage = False

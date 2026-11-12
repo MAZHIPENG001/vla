@@ -1,16 +1,17 @@
 # π*0.6 / RECAP：价值模型与优势条件策略
 
 本模块参考仓库中的 [π*0.6 论文](../../../../docs/pistar06.pdf)（IV-A、IV-B、V-B、V-C 节及附录 F），
-实现 Qwen 价值模型、优势估计和优势条件文本，并接入 `QwenOFTRecap` 策略。
+实现 Qwen 价值模型、优势估计和优势条件文本，并接入 `QwenOFTRecap` 和 `QwenPI_Recap` 策略。
 价值骨干采用 `Qwen/Qwen3-VL-2B-Instruct`，复用项目 Qwen 的加载、图像预处理、对话模板和特征接口。
-策略沿用 OFT 的连续动作 MLP 与 L1 loss；当前实现不包含论文的 flow matching、子任务生成训练或 CFG 动作混合。
+`QwenOFTRecap` 使用连续动作 MLP 与 L1 loss，`QwenPI_Recap` 使用 LayerwiseFM 动作头与 flow-matching loss；
+当前实现不包含子任务生成训练或 CFG 动作混合。
 
 完整使用流程：
 
 1. 用完整轨迹的归一化剩余回报独立训练 critic，得到 `critic.pt`。
 2. 在代表性数据上校准每个任务的优势阈值，写入共享任务 YAML。
 3. 加载并冻结 critic，在 VLA 训练的每个 batch 中即时计算优势条件，只优化动作损失。
-   部署默认固定使用 `Advantage: positive`，不执行 critic。
+4. 部署默认固定使用 `Advantage: positive`，不执行 critic。
 
 这里的“在线”指训练时重算**已录制轨迹**的优势，不包含环境交互或 rollout 采集。
 离线标签导出用于检查和校准，VLA 训练不读取这些标签。
@@ -26,7 +27,7 @@
 - [Python 接口](#python-接口)
 - [验证入口](#验证入口)
 
-## 配置与代码入口
+## RECAP配置与代码入口
 
 策略、价值训练和阈值校准共用环境对应的任务 YAML。本文使用
 [`examples/LIBERO/train_files/starvla_oft_recap_libero.yaml`](../../../../examples/LIBERO/train_files/starvla_oft_recap_libero.yaml)。
@@ -34,13 +35,13 @@
 
 | 配置节点 | 用途 |
 | --- | --- |
-| `framework` | VLA 策略骨干、动作头和 `advantage_conditioning` |
+| `framework*` | VLA 策略骨干、动作头和 `advantage_conditioning` |
 | `recap.qwenvl` / `recap.value_model` | 独立 critic 骨干、价值头和权重 |
 | `recap.data` / `recap.reward` | 轨迹结果、任务标识和奖励尺度 |
 | `recap.advantage` | 优势公式、预测批大小和校准阈值 |
 | `recap.training` | 独立价值训练参数 |
 | `datasets.vla_data` | 共用数据路径、混合数据集与加载参数 |
-| `trainer` | VLA 策略训练参数，与 `recap.training` 独立 |
+| `trainer*` | VLA 策略训练参数 |
 
 `QwenRecap` 接受任务 YAML 路径、普通 dict 或 OmegaConf，合并 `QwenRecapDefaultConfig`，
 保留完整配置副本。价值模型内部适配 Qwen 工厂需要的配置，不改写调用方的 `framework`，
@@ -53,6 +54,7 @@
 | [`value_model.py`](value_model.py) | `QwenValueModel`、价值分类头与 MC return 损失 |
 | [`advantage.py`](advantage.py) | `AdvantageModule`、`AdvantageCondition` 及张量计算 |
 | [`QwenOFTRecap.py`](../../framework/VLM4A/QwenOFTRecap.py) | 优势条件策略，注册名 `QwenOFTRecap` |
+| [`QwenPI_Recap.py`](../../framework/VLM4A/QwenPI_Recap.py) | PI 优势条件策略，注册名 `QwenPI_Recap` |
 | [`vla/dataloader/__init__.py`](../../../dataloader/__init__.py) | 策略与价值流程共用的 `build_dataloader` |
 | [`recap_targets.py`](../../../dataloader/recap_targets.py) | 完整轨迹验证、标量 Reward/Return 和 bootstrap 索引 |
 | [`train_recap_value.py`](../../../training/train_recap_value.py) | 独立价值训练、验证与恢复 |
@@ -405,7 +407,15 @@ recap:
 ```
 
 这是共享任务 YAML 的配置片段，还需保留策略／critic 模型路径、`datasets`、`recap.data/reward` 和训练配置。
-`enabled: false` 关闭优势条件，不加载 critic，执行普通 OFT 训练；
+`QwenPI_Recap` 是独立注册的 PI 优势条件模型，复用 QwenPI 的骨干与 LayerwiseFM 动作头配置。
+使用 `framework.name: QwenPI_Recap`，其 `advantage_conditioning` 默认 `enabled: true`，
+DataLoader 会自动准备相同的在线优势字段，critic checkpoint 和任务阈值要求与 OFT 一致。
+原始 `framework.name: QwenPI` 保留原来的程序和训练／推理流程。
+它将可选 `Subtask` 和 `Advantage: positive/negative` 追加到完整任务提示后，
+通过各层 VLM 隐藏状态传入动作 DiT，优化目标仍为 flow-matching 动作损失。
+`predict_action(..., advantage="positive"/"negative"/"unconditional")` 与 OFT 的选择方式一致。
+
+`enabled: false` 关闭优势条件，不加载 critic，执行普通策略训练；
 `enabled: true` 时必须提供训练好的 critic、有限且覆盖所用任务的阈值，以及 `freeze_critic: true`。
 `freeze_backbone` 只控制独立价值训练时是否更新 Qwen 主干，策略训练始终冻结整个 critic 并保持其 eval。
 
@@ -425,7 +435,7 @@ bootstrap 观测只含图像、指令和可选状态，单独求值，不把未�
 CoT_prompt 先展开，条件和动作查询后追加。条件只影响后面的动作查询；
 `subtask` 可选，若提供则必须是字符串。
 训练时正负标签经阈值比较后转为条件文本，按配置概率移除条件，学习无条件动作预测。
-策略的优化目标为 **`loss = action_loss`**，仍使用 OFT 的 L1 动作回归。
+策略的优化目标为 **`loss = action_loss`**：OFT 使用 L1 动作回归，QwenPI_Recap 使用 flow matching。
 优势不作为样本 loss 权重，也不直接加入损失；动作损失不沿此路径反传至 critic。
 日志增加 `advantage_mean`，critic 随策略 state_dict 保存。
 

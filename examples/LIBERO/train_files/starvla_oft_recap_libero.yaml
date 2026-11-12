@@ -18,7 +18,7 @@ framework:
     action_horizon: 8
     action_model_type: MLP
   advantage_conditioning:
-    enabled: true  # false: ordinary OFT training without advantage labels or critic.
+    enabled: true  # false: ordinary training without advantage labels or critic.
     freeze_critic: true  # Required: train the critic separately before policy training.
     dropout_probability: 0.3
     inference_condition: positive
@@ -34,7 +34,7 @@ recap:
     freeze_backbone: true
     checkpoint: null
   advantage:
-    mode: posttrain
+    mode: post0train
     n_steps: 50
     task_thresholds: {}  # "dataset_name:task_id": calibrated threshold used during online training.
   # Explicit outcomes; unknown or truncated episodes must not be treated as successes.
